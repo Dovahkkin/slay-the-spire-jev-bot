@@ -335,13 +335,20 @@ class CommunicationModDriver(BaseGameDriver):
             try:
                 raw_json = json.loads(line_str)
 
-                # 1. 检查游戏内外状态
-                in_game = raw_json.get("in_game", False)
-                if not in_game:
+                # 1. 如果通信层返回错误信息，发送 state 指令重新拉取当前稳定状态以打破死锁
+                if "error" in raw_json:
+                    err_msg = raw_json.get("error", "")
+                    logger.warning(f"[CommunicationMod 报错]: {err_msg}，请求刷新 state...")
+                    sys.stdout.write("state\n")
+                    sys.stdout.flush()
+                    continue
+
+                # 2. 只有明确带有 in_game 且为 False 时，才判定在游戏外/主菜单
+                if "in_game" in raw_json and not raw_json.get("in_game", True):
                     logger.info("游戏当前处于主菜单或游戏外部，等待玩家进入/开始新游戏...")
                     continue
 
-                # 2. 检查游戏是否已就绪（避免在出牌动画或场景过渡中提前执行）
+                # 3. 检查游戏是否已就绪（避免在出牌动画或场景过渡中提前执行）
                 ready = raw_json.get("ready_for_command", False)
                 available_cmds = raw_json.get("available_commands", [])
 
