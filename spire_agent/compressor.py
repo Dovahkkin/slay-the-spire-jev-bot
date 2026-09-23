@@ -165,6 +165,7 @@ class StateCompressor:
                     id=pot.get("id", ""),
                     name=pot.get("name", f"Potion_{idx}"),
                     can_use=pot.get("can_use", False),
+                    can_discard=pot.get("can_discard", False),
                     requires_target=pot.get("requires_target", False),
                 )
             )
@@ -287,6 +288,7 @@ class StateCompressor:
                 id=pot.get("id", ""),
                 name=pot.get("name", f"Potion_{idx}"),
                 can_use=pot.get("can_use", False),
+                can_discard=pot.get("can_discard", False),
                 requires_target=pot.get("requires_target", False),
             )
             for idx, pot in enumerate(game_state.get("potions", []))

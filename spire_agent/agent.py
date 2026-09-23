@@ -56,6 +56,7 @@ class JevSpireAgent:
         self.model = model or os.environ.get("TYPESAFE_DEFAULT_MODEL")
         self.enable_deterministic_lethal = enable_deterministic_lethal
         self.skipped_cards = False  # 记录当前战斗结算中是否已执行过跳过抓牌 (Skip)
+        self.skipped_potions = False  # 记录当前战斗结算中是否因药水栏满跳过药水拾取
         self.current_floor = 0
         self.visited_shop = False
         self.shop_purged = 0
@@ -448,6 +449,7 @@ class JevSpireAgent:
         if game_state.floor != self.current_floor:
             self.current_floor = game_state.floor
             self.skipped_cards = False
+            self.skipped_potions = False
             self.visited_shop = False
             self.shop_purged = 0
 
@@ -457,6 +459,8 @@ class JevSpireAgent:
             raw_rewards = game_state.screen_state.get("rewards", [])
             if not raw_rewards:
                 logger.info("战利品已拾取完毕，发送 PROCEED 前进。")
+                self.skipped_cards = False
+                self.skipped_potions = False
                 return ProceedAction.create()
 
             # 1. 优先自动拾取金币、被盗金币、遗物、钥匙
@@ -472,14 +476,18 @@ class JevSpireAgent:
                     logger.info(f"自动拾取钥匙 (索引 #{idx})")
                     return ChooseAction.create(idx)
 
-            # 2. 拾取药水（若药水栏未满）
-            potion_slots = 3  # 默认 3 槽位
-            has_empty_slot = len(game_state.potions) < potion_slots or any(not p.can_use for p in game_state.potions)
+            # 2. 拾取药水（必须有真正的空药水槽位且当前结算中尚未发生满槽被拒）
+            has_empty_slot = any(p.is_empty for p in game_state.potions) or len(game_state.potions) < 2
             for idx, r in enumerate(raw_rewards):
                 rtype = str(r.get("reward_type", "")).upper()
-                if rtype == "POTION" and has_empty_slot:
-                    logger.info(f"自动拾取战利品药水 (索引 #{idx})")
-                    return ChooseAction.create(idx)
+                if rtype == "POTION":
+                    if has_empty_slot and not self.skipped_potions:
+                        logger.info(f"药水栏尚有空位，尝试拾取战利品药水 (索引 #{idx})")
+                        # 标记本次结算已尝试拾取药水；若下帧该药水奖励仍未消失，则表明游戏槽满被拒，自动转为放弃
+                        self.skipped_potions = True
+                        return ChooseAction.create(idx)
+                    else:
+                        logger.info(f"药水栏已满，放弃拾取战利品药水 (索引 #{idx})，避免 NOT ENOUGH POTION SLOTS 导致卡屏。")
 
             # 3. 点击卡牌奖励进入选牌界面（若尚未选择跳过）
             for idx, r in enumerate(raw_rewards):
@@ -491,8 +499,10 @@ class JevSpireAgent:
                     logger.info(f"开启卡牌奖励界面 (索引 #{idx})")
                     return ChooseAction.create(idx)
 
-            # 4. 全部处理完成（或已跳过卡牌），推进
+            # 4. 全部处理完成（或已跳过卡牌/放弃药水），发送 PROCEED 前进
             self.skipped_cards = False
+            self.skipped_potions = False
+            logger.info("可拾取奖励均已处理完毕，发送 PROCEED 前往下一房间。")
             return ProceedAction.create()
 
         elif st == "CARD_REWARD":
@@ -516,6 +526,7 @@ class JevSpireAgent:
 
         elif st == "MAP":
             self.skipped_cards = False
+            self.skipped_potions = False
             self.visited_shop = False
             self.shop_purged = 0
             next_nodes = game_state.screen_state.get("next_nodes", [])

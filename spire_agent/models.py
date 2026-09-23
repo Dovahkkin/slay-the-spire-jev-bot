@@ -64,8 +64,22 @@ class Potion(BaseModel):
     name: str
     id: str
     can_use: bool = False
+    can_discard: bool = False
     requires_target: bool = False
     description: str = ""
+
+    @property
+    def is_empty(self) -> bool:
+        """判断是否为空药水槽位"""
+        name_clean = self.name.lower().replace(" ", "").replace("_", "")
+        id_clean = self.id.lower().replace(" ", "").replace("_", "")
+        if "potionslot" in name_clean or "potionslot" in id_clean:
+            return True
+        if not self.name or not self.id:
+            return True
+        if not self.can_discard:
+            return True
+        return False
 
 
 class CombatState(BaseModel):

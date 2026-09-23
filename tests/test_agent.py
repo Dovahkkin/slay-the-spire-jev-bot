@@ -154,6 +154,47 @@ class TestSpireAgent(unittest.TestCase):
         self.assertIsInstance(act_leave, LeaveAction)
         self.assertEqual(act_leave.raw_command, "LEAVE")
 
+    def test_potion_looting_when_full_vs_empty(self):
+        from spire_agent import FullGameState, ChooseAction, ProceedAction, Potion
+        agent = JevSpireAgent()
+
+        # 场景 A: 药水槽已满 (3 个真实药水，can_discard 为 True)
+        # 战斗结算奖励中出现 POTION 奖励时，绝不尝试拾取药水，而是发送 PROCEED 前进
+        full_potions = [
+            Potion(index=0, id="Fire Potion", name="Fire Potion", can_discard=True),
+            Potion(index=1, id="Block Potion", name="Block Potion", can_discard=True),
+            Potion(index=2, id="Strength Potion", name="Strength Potion", can_discard=True),
+        ]
+        reward_potion_full = FullGameState(
+            screen_type="COMBAT_REWARD",
+            screen_state={"rewards": [{"reward_type": "POTION"}]},
+            available_commands=["choose", "proceed"],
+            potions=full_potions,
+            floor=4,
+        )
+        act_full = agent.decide_screen_action(reward_potion_full)
+        # 槽满时必须放弃药水直接推进，不能死锁发 CHOOSE 0
+        self.assertIsInstance(act_full, ProceedAction)
+        self.assertEqual(act_full.raw_command, "PROCEED")
+
+        # 场景 B: 药水槽有空位 (包含 Potion Slot)
+        # 应当正常拾取药水
+        empty_potions = [
+            Potion(index=0, id="Fire Potion", name="Fire Potion", can_discard=True),
+            Potion(index=1, id="Block Potion", name="Block Potion", can_discard=True),
+            Potion(index=2, id="Potion Slot", name="Potion Slot", can_discard=False),
+        ]
+        reward_potion_empty = FullGameState(
+            screen_type="COMBAT_REWARD",
+            screen_state={"rewards": [{"reward_type": "POTION"}]},
+            available_commands=["choose", "proceed"],
+            potions=empty_potions,
+            floor=5,
+        )
+        act_empty = agent.decide_screen_action(reward_potion_empty)
+        self.assertIsInstance(act_empty, ChooseAction)
+        self.assertEqual(act_empty.choice, "0")
+
 
 if __name__ == "__main__":
     unittest.main()
