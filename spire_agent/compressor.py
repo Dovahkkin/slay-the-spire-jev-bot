@@ -301,6 +301,7 @@ class StateCompressor:
             screen_type=screen_type,
             screen_state=screen_state,
             available_commands=raw.get("available_commands", []),
+            choice_list=game_state.get("choice_list", []),
             ready_for_command=raw.get("ready_for_command", True),
             in_game=raw.get("in_game", True),
             floor=game_state.get("floor", 0),

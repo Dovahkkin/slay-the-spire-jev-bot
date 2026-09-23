@@ -17,6 +17,9 @@ from .models import (
     ProceedAction,
     CancelAction,
     ConfirmAction,
+    LeaveAction,
+    ReturnAction,
+    SkipAction,
     Card,
     Monster,
     MapNode,
@@ -53,6 +56,9 @@ class JevSpireAgent:
         self.model = model or os.environ.get("TYPESAFE_DEFAULT_MODEL")
         self.enable_deterministic_lethal = enable_deterministic_lethal
         self.skipped_cards = False  # 记录当前战斗结算中是否已执行过跳过抓牌 (Skip)
+        self.current_floor = 0
+        self.visited_shop = False
+        self.shop_purged = 0
 
         # 智能识别 Vercel AI Gateway 凭证 (vck_...)
         if self.api_key and self.api_key.strip().startswith("vck_"):
@@ -439,7 +445,13 @@ class JevSpireAgent:
         自动拾取战利品、触发选牌、触发地图导航、营地休息等。
         """
         st = game_state.screen_type.upper()
-        logger.info(f"处理非战斗界面: [{st}]")
+        if game_state.floor != self.current_floor:
+            self.current_floor = game_state.floor
+            self.skipped_cards = False
+            self.visited_shop = False
+            self.shop_purged = 0
+
+        logger.info(f"处理非战斗界面: [{st}] (第 {game_state.floor} 层)")
 
         if st == "COMBAT_REWARD":
             raw_rewards = game_state.screen_state.get("rewards", [])
@@ -504,6 +516,8 @@ class JevSpireAgent:
 
         elif st == "MAP":
             self.skipped_cards = False
+            self.visited_shop = False
+            self.shop_purged = 0
             next_nodes = game_state.screen_state.get("next_nodes", [])
 
             boss_available = game_state.screen_state.get("boss_available", False)
@@ -516,6 +530,44 @@ class JevSpireAgent:
                 next_nodes=next_nodes,
                 boss_available=boss_available,
             )
+
+        elif st == "SHOP_ROOM":
+            # 商店房间外层（地牢房间）：未逛过商店且商人可点击则进入；否则推进前往地图
+            if not self.visited_shop and "choose" in game_state.available_commands:
+                logger.info("进入商店房间，点击商人进入商店购物界面...")
+                return ChooseAction.create(0)
+            if "proceed" in game_state.available_commands:
+                logger.info("商店采购流程结束，发送 PROCEED 前往地图。")
+                self.visited_shop = False
+                return ProceedAction.create()
+            if "choose" in game_state.available_commands:
+                return ChooseAction.create(0)
+            return ProceedAction.create()
+
+        elif st == "SHOP_SCREEN":
+            # 商店内部选购界面
+            self.visited_shop = True
+            choices = [str(c).lower() for c in game_state.choice_list]
+
+            # 1. 优先净化/移除卡牌 (Purge) 精简卡组（每间商店最多 1 次）
+            if "purge" in choices and "choose" in game_state.available_commands and self.shop_purged < 1:
+                idx = choices.index("purge")
+                logger.info(f"在商店选择【卡牌净化/移除 (Purge)】(选项 #{idx}) 精简卡组。")
+                self.shop_purged += 1
+                return ChooseAction.create(idx)
+
+            # 2. 检查是否有离开商店指令 (CommunicationMod 商店界面专属 leave 指令)
+            if "leave" in game_state.available_commands:
+                logger.info("商店采购已结束，发送 LEAVE 离开商店。")
+                return LeaveAction.create()
+            if "cancel" in game_state.available_commands:
+                logger.info("商店采购已结束，发送 CANCEL 离开商店。")
+                return CancelAction.create()
+            if "return" in game_state.available_commands:
+                return ReturnAction.create()
+            if "proceed" in game_state.available_commands:
+                return ProceedAction.create()
+            return LeaveAction.create()
 
         elif st == "REST":
             # 营地休息处
@@ -575,15 +627,35 @@ class JevSpireAgent:
                     return ChooseAction.create(idx)
             return ProceedAction.create()
 
-        # 兜底推进逻辑：严格只在可用指令中挑选，绝不盲目发送不合法的 PROCEED
+        elif st == "BOSS_REWARD":
+            if "choose" in game_state.available_commands:
+                logger.info("在 Boss 遗物奖励界面选取 Boss 遗物...")
+                return ChooseAction.create(0)
+            return ProceedAction.create()
+
+        elif st == "GAME_OVER":
+            logger.info("本局游戏已结束 (Game Over)。准备返回主菜单。")
+            if "proceed" in game_state.available_commands:
+                return ProceedAction.create()
+            if "confirm" in game_state.available_commands:
+                return ConfirmAction.create()
+            return ProceedAction.create()
+
+        # 兜底推进逻辑：严格只在可用指令中挑选，绝不盲目发送不合法的指令
         if "confirm" in game_state.available_commands:
             return ConfirmAction.create()
-        if "choose" in game_state.available_commands:
-            return ChooseAction.create(0)
         if "proceed" in game_state.available_commands:
             return ProceedAction.create()
+        if "leave" in game_state.available_commands:
+            return LeaveAction.create()
         if "cancel" in game_state.available_commands:
             return CancelAction.create()
-        return ConfirmAction.create()
+        if "return" in game_state.available_commands:
+            return ReturnAction.create()
+        if "skip" in game_state.available_commands:
+            return SkipAction.create()
+        if "choose" in game_state.available_commands:
+            return ChooseAction.create(0)
+        return ProceedAction.create()
 
 

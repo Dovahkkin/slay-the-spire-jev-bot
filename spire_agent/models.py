@@ -121,6 +121,7 @@ class FullGameState(BaseModel):
     screen_type: str = "NONE"
     screen_state: Dict[str, Any] = Field(default_factory=dict)
     available_commands: List[str] = Field(default_factory=list)
+    choice_list: List[str] = Field(default_factory=list)
     ready_for_command: bool = True
     in_game: bool = True
     floor: int = 0
@@ -146,7 +147,7 @@ class FullGameState(BaseModel):
 
 # --- 结构化游戏指令 ---
 class BaseAction(BaseModel):
-    action_type: Literal["play", "potion", "end_turn", "choose", "proceed", "cancel", "confirm"]
+    action_type: Literal["play", "potion", "end_turn", "choose", "proceed", "cancel", "confirm", "leave", "return", "skip"]
     raw_command: str
 
 
@@ -213,5 +214,29 @@ class ConfirmAction(BaseAction):
     @classmethod
     def create(cls) -> "ConfirmAction":
         return cls(raw_command="CONFIRM")
+
+
+class LeaveAction(BaseAction):
+    action_type: Literal["leave"] = "leave"
+
+    @classmethod
+    def create(cls) -> "LeaveAction":
+        return cls(raw_command="LEAVE")
+
+
+class ReturnAction(BaseAction):
+    action_type: Literal["return"] = "return"
+
+    @classmethod
+    def create(cls) -> "ReturnAction":
+        return cls(raw_command="RETURN")
+
+
+class SkipAction(BaseAction):
+    action_type: Literal["skip"] = "skip"
+
+    @classmethod
+    def create(cls) -> "SkipAction":
+        return cls(raw_command="SKIP")
 
 

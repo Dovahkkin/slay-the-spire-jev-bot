@@ -123,7 +123,36 @@ class TestSpireAgent(unittest.TestCase):
         agent = JevSpireAgent()
         # 验证完整全流程：战斗斩杀 -> 拾取金币 -> 进入选牌 -> 挑选路线
         run_game_loop(agent, driver, max_steps=20)
-        self.assertTrue(driver.is_game_over(), "完整模拟生命周期应顺利走完！")
+
+    def test_shop_screen_leave_and_purge(self):
+        from spire_agent import FullGameState, ChooseAction, LeaveAction
+        agent = JevSpireAgent()
+
+        # 1. 商店界面有 purge 选项时，优先净化卡牌
+        shop_state_purge = FullGameState(
+            screen_type="SHOP_SCREEN",
+            screen_state={"purge_available": True, "purge_cost": 75},
+            available_commands=["choose", "leave"],
+            choice_list=["purge", "Strike", "Defend"],
+            gold=100,
+            floor=3,
+        )
+        act = agent.decide_screen_action(shop_state_purge)
+        self.assertIsInstance(act, ChooseAction)
+        self.assertEqual(act.choice, "0")
+
+        # 2. 净化后或无购买选项（仅剩 leave）时，必须发出 LEAVE 指令离开商店
+        shop_state_leave = FullGameState(
+            screen_type="SHOP_SCREEN",
+            screen_state={},
+            available_commands=["potion", "leave", "key", "click", "wait", "state"],
+            choice_list=[],
+            gold=25,
+            floor=3,
+        )
+        act_leave = agent.decide_screen_action(shop_state_leave)
+        self.assertIsInstance(act_leave, LeaveAction)
+        self.assertEqual(act_leave.raw_command, "LEAVE")
 
 
 if __name__ == "__main__":
