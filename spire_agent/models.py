@@ -146,7 +146,7 @@ class FullGameState(BaseModel):
 
 # --- 结构化游戏指令 ---
 class BaseAction(BaseModel):
-    action_type: Literal["play", "potion", "end_turn", "choose", "proceed", "cancel"]
+    action_type: Literal["play", "potion", "end_turn", "choose", "proceed", "cancel", "confirm"]
     raw_command: str
 
 
@@ -205,4 +205,13 @@ class CancelAction(BaseAction):
     @classmethod
     def create(cls) -> "CancelAction":
         return cls(raw_command="CANCEL")
+
+
+class ConfirmAction(BaseAction):
+    action_type: Literal["confirm"] = "confirm"
+
+    @classmethod
+    def create(cls) -> "ConfirmAction":
+        return cls(raw_command="CONFIRM")
+
 

@@ -16,10 +16,12 @@ from .models import (
     ChooseAction,
     ProceedAction,
     CancelAction,
+    ConfirmAction,
     Card,
     Monster,
     MapNode,
 )
+
 from .compressor import StateCompressor
 
 try:
@@ -536,18 +538,28 @@ class JevSpireAgent:
 
         elif st == "HAND_SELECT":
             # 手牌选择界面（例如战吼放回牌顶、真拟消耗、武装升级等）
+            if "confirm" in game_state.available_commands:
+                logger.info("手牌已选好，点击 CONFIRM 确认推进。")
+                return ConfirmAction.create()
             if "proceed" in game_state.available_commands or game_state.screen_state.get("can_confirm", False):
-                logger.info("手牌选择满足条件，点击确认推进。")
+                logger.info("手牌选择满足条件，点击推进。")
                 return ProceedAction.create()
-            logger.info("在手牌选择界面选取第 0 张卡牌...")
-            return ChooseAction.create(0)
+            if "choose" in game_state.available_commands:
+                logger.info("在手牌选择界面选取第 0 张卡牌...")
+                return ChooseAction.create(0)
+            return ConfirmAction.create()
 
         elif st == "GRID":
             # 卡牌升级或卡牌选择
+            if "confirm" in game_state.available_commands:
+                logger.info("网格卡牌已选好，点击 CONFIRM 确认推进。")
+                return ConfirmAction.create()
             if "proceed" in game_state.available_commands or game_state.screen_state.get("confirm_up", False):
                 return ProceedAction.create()
-            logger.info("在卡牌列表选择第一张卡牌进行升级/交互。")
-            return ChooseAction.create(0)
+            if "choose" in game_state.available_commands:
+                logger.info("在卡牌列表选择第一张卡牌进行升级/交互。")
+                return ChooseAction.create(0)
+            return ConfirmAction.create()
 
         elif st == "CHEST":
             if game_state.screen_state.get("chest_open", False):
@@ -564,12 +576,14 @@ class JevSpireAgent:
             return ProceedAction.create()
 
         # 兜底推进逻辑：严格只在可用指令中挑选，绝不盲目发送不合法的 PROCEED
+        if "confirm" in game_state.available_commands:
+            return ConfirmAction.create()
         if "choose" in game_state.available_commands:
             return ChooseAction.create(0)
         if "proceed" in game_state.available_commands:
             return ProceedAction.create()
         if "cancel" in game_state.available_commands:
             return CancelAction.create()
-        return ProceedAction.create()
+        return ConfirmAction.create()
 
 

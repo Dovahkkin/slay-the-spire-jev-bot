@@ -15,6 +15,7 @@ from .models import (
     ChooseAction,
     ProceedAction,
     CancelAction,
+    ConfirmAction,
 )
 from .compressor import StateCompressor
 from .agent import JevSpireAgent
@@ -37,10 +38,12 @@ __all__ = [
     "ChooseAction",
     "ProceedAction",
     "CancelAction",
+    "ConfirmAction",
     "StateCompressor",
     "JevSpireAgent",
     "BaseGameDriver",
     "MockGameDriver",
     "CommunicationModDriver",
 ]
+
 
