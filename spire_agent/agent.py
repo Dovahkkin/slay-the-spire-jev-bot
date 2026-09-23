@@ -1,5 +1,6 @@
 import os
 import logging
+import itertools
 from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 
@@ -148,40 +149,132 @@ class JevSpireAgent:
         # 若未配置 API Key 或调用异常，执行离线启发式模拟（保证本地调试与离线单测畅通无阻）
         return self._heuristic_fallback(state, playable_cards, alive_monsters)
 
-    def _check_deterministic_lethal(
-        self, state: CombatState, playable_cards: List[Card], alive_monsters: List[Monster]
-    ) -> Optional[PlayCardAction]:
+    def _find_lethal_sequence_for_monster(
+        self, state: CombatState, playable_cards: List[Card], monster: Monster
+    ) -> Optional[List[Card]]:
         """
-        确定性斩杀检查：
-        1. 直接斩杀：单张攻击牌伤害 >= 剩余生命 + 格挡；
-        2. 协同斩杀：若手里有 0 费【活动肌肉 (Flex)】且打出后某张攻击牌刚好能斩杀，优先打出 Flex！
+        计算针对特定怪物的多卡连击斩杀序列：
+        支持单卡斩杀、Flex 协同斩杀、易伤前置斩杀、多张攻击卡组合斩杀。
+        如果当前能量与手牌能够在本回合击杀该怪物，返回推荐打出顺序的卡牌列表。
         """
+        effective_hp = monster.current_hp + monster.block
+        if effective_hp <= 0:
+            return []
+
         energy = state.player.energy
+        attacks = [c for c in playable_cards if c.type == "ATTACK"]
+        if not attacks:
+            return None
+
+        # 检查 0 费力量增益卡 (如活动肌肉 Flex)
         flex_card = next(
             (c for c in playable_cards if c.cost == 0 and ("flex" in c.name.lower() or "strength" in (c.description or "").lower())),
             None,
         )
+        flex_boost = (4 if flex_card.upgraded else 2) if flex_card else 0
 
-        # A. 直接单牌斩杀
-        for m in alive_monsters:
-            effective_hp = m.current_hp + m.block
-            for c in playable_cards:
-                if c.type == "ATTACK" and c.cost <= energy:
-                    if c.damage >= effective_hp:
-                        target = m.index if (c.has_target or c.target_type == "ENEMY") else None
-                        return PlayCardAction.create(c.index, target)
+        # 检查 0 费充能卡 (如亮剑 Seeing Red +2 费)
+        seeing_red = next((c for c in playable_cards if c.cost == 0 and "seeing red" in c.name.lower()), None)
+        extra_energy = 2 if seeing_red else 0
+        total_energy = energy + extra_energy
 
-        # B. Flex 协同斩杀
+        # 怪物是否已有易伤
+        is_target_vuln = any(pw.id == "Vulnerable" and pw.amount > 0 for pw in monster.powers)
+
+        # 1. 快速单卡斩杀
+        for c in attacks:
+            if c.cost <= energy:
+                dmg = c.damage
+                if is_target_vuln:
+                    dmg = int(dmg * 1.5)
+                if dmg >= effective_hp:
+                    return [c]
+
+        # 2. 快速 Flex + 单卡斩杀
         if flex_card:
-            flex_boost = 4 if flex_card.upgraded else 2
-            for m in alive_monsters:
-                effective_hp = m.current_hp + m.block
-                for c in playable_cards:
-                    if c.type == "ATTACK" and c.index != flex_card.index and c.cost <= energy:
-                        if c.damage + flex_boost >= effective_hp:
-                            logger.info(f"[协同斩杀触发] 先打出 0 费 {flex_card.name}，赋能后续 {c.name} 斩杀！")
-                            target = m.index if (flex_card.has_target or flex_card.target_type == "ENEMY") else None
-                            return PlayCardAction.create(flex_card.index, target)
+            for c in attacks:
+                if c.index != flex_card.index and c.cost <= energy:
+                    dmg = c.damage + flex_boost
+                    if is_target_vuln:
+                        dmg = int(dmg * 1.5)
+                    if dmg >= effective_hp:
+                        return [flex_card, c]
+
+        # 3. 多卡组合连击搜索 (搜索 2~5 张攻击卡的组合与排列)
+        candidate_attacks = [c for c in attacks if c.cost <= total_energy]
+        for r in range(2, min(len(candidate_attacks) + 1, 6)):
+            for combo in itertools.permutations(candidate_attacks, r):
+                cost_sum = sum(c.cost for c in combo)
+                use_sr = False
+                if cost_sum > energy:
+                    if cost_sum <= total_energy and seeing_red:
+                        use_sr = True
+                    else:
+                        continue
+
+                # 模拟该 combo 造成的累计伤害（考虑 Flex、Bash 产生易伤等）
+                cur_vuln = is_target_vuln
+                total_dmg = 0
+                for c in combo:
+                    c_dmg = c.damage + (flex_boost if flex_card else 0)
+                    if cur_vuln:
+                        c_dmg = int(c_dmg * 1.5)
+                    total_dmg += c_dmg
+                    if "vulnerable" in (c.description or "").lower() or c.id == "Bash":
+                        cur_vuln = True
+
+                if total_dmg >= effective_hp:
+                    seq: List[Card] = []
+                    if use_sr and seeing_red:
+                        seq.append(seeing_red)
+                    if flex_card:
+                        seq.append(flex_card)
+                    seq.extend(combo)
+                    return seq
+
+        return None
+
+    def _check_deterministic_lethal(
+        self, state: CombatState, playable_cards: List[Card], alive_monsters: List[Monster]
+    ) -> Optional[PlayCardAction]:
+        """
+        确定性斩杀检查（单卡或多卡连击）：
+        优先检查是否能终结战局或击杀高威胁/残血怪物。
+        若存在斩杀连招，返回连招的第一张卡牌动作。
+        """
+        # 1. 如果场上只有 1 个存活敌人，检查是否能在本回合直接消灭并结束战斗！
+        if len(alive_monsters) == 1:
+            m = alive_monsters[0]
+            lethal_seq = self._find_lethal_sequence_for_monster(state, playable_cards, m)
+            if lethal_seq:
+                first_card = lethal_seq[0]
+                target = m.index if (first_card.has_target or first_card.target_type == "ENEMY") else None
+                logger.info(
+                    f"[终结战局连击斩杀触发] 本回合可连击消灭最后敌人 {m.name} (HP: {m.current_hp}+{m.block})！"
+                    f"斩杀序列: {[c.name for c in lethal_seq]}，先打出: {first_card.name} (目标: E{target})"
+                )
+                return PlayCardAction.create(first_card.index, target)
+
+        # 2. 如果场上有多个敌人，优先检查是否能击杀正在攻击的敌人（消灭伤害源）或残血敌人
+        # 按照“正在攻击且伤害高 -> 残血”排序
+        sorted_monsters = sorted(
+            alive_monsters,
+            key=lambda m: (
+                0 if "ATTACK" in m.intent.upper() else 1,
+                - (m.move_damage * max(1, m.move_hits)) if "ATTACK" in m.intent.upper() else 0,
+                m.current_hp + m.block,
+            ),
+        )
+        for m in sorted_monsters:
+            lethal_seq = self._find_lethal_sequence_for_monster(state, playable_cards, m)
+            if lethal_seq:
+                first_card = lethal_seq[0]
+                target = m.index if (first_card.has_target or first_card.target_type == "ENEMY") else None
+                logger.info(
+                    f"[击杀减员连击斩杀触发] 本回合可消灭敌人 {m.name}！"
+                    f"斩杀序列: {[c.name for c in lethal_seq]}，优先打出: {first_card.name} (目标: E{target})"
+                )
+                return PlayCardAction.create(first_card.index, target)
 
         return None
 
@@ -290,11 +383,13 @@ class JevSpireAgent:
         card_choice_question = Choice(
             instructions=(
                 "Which action should the player take next given the battlefield state? "
-                "Follow Slay the Spire expert play sequencing: "
-                "1) Play 0-cost buffs/energy/draw setups first to maximize options; "
-                "2) Apply Vulnerable/Weak debuffs BEFORE dealing heavy attacks; "
-                "3) Play block to mitigate unblocked incoming damage; "
-                "4) Play high-impact attacks or persistent powers. "
+                "CRITICAL SPIRE PRINCIPLE: Dead enemies deal ZERO damage. If an enemy can be killed or combat ended this turn, ATTACK TO KILL FIRST! "
+                "Play sequencing priority: "
+                "1) 0-cost buffs/energy/draw setups first to expand hand options; "
+                "2) LETHAL / FINISHER: If attacks can eliminate an enemy (especially ending combat or eliminating an attacking enemy), attack to kill immediately! Never block if you can eliminate the threat by killing; "
+                "3) Apply Vulnerable/Weak debuffs BEFORE dealing heavy attacks; "
+                "4) DEFENSE: Play block only when necessary to mitigate unblocked incoming damage from surviving enemies; "
+                "5) OFFENSE / SCALING: Play remaining attacks or persistent powers. "
                 "Do NOT end turn prematurely if useful cards can still be played."
             ),
             criteria=card_criteria,
@@ -397,13 +492,24 @@ class JevSpireAgent:
         """
         离线启发式兜底逻辑（用于无 API Key 时的本地沙盒演示与单元测试）
         具备基础时序与攻防权衡能力：
-        1. 0 费增益优先：手牌有攻击时优先打出 0 费加攻（Flex 等）
-        2. 防御减伤：当受到未格挡伤害时，优先打出格挡
-        3. 易伤前置：若手牌有易伤卡（如 Bash），在主力攻击前打出
-        4. 主力攻击/斩杀：优先集火残血或正在蓄力高伤的敌人
+        1. 连击斩杀绝对优先：若手牌可击杀任一敌人（死人没有输出），全力出击，绝不过度防御！
+        2. 0 费增益优先：手牌有攻击时优先打出 0 费加攻（Flex 等）
+        3. 防御减伤：只有在无法消灭攻击者且真正面临未格挡威胁时，才打出格挡
+        4. 易伤前置：若手牌有易伤卡（如 Bash），在主力攻击前打出
+        5. 主力攻击：优先集火残血或正在蓄力高伤的敌人
         """
-        # 1. 0 费力量增益卡牌前置
         playable_attacks = [c for c in playable_cards if c.type == "ATTACK"]
+
+        # 1. 连击斩杀优先检测：如果能击杀任意敌人（特别是单怪结束战斗或击杀正在攻击的敌人），绝不防御！
+        for m in alive_monsters:
+            lethal_seq = self._find_lethal_sequence_for_monster(state, playable_cards, m)
+            if lethal_seq:
+                first_card = lethal_seq[0]
+                target = m.index if (first_card.has_target or first_card.target_type == "ENEMY") else None
+                logger.info(f"[兜底规则-连击斩杀优先] 击杀目标 {m.name}，优先出牌: {first_card.name}")
+                return PlayCardAction.create(first_card.index, target)
+
+        # 2. 0 费力量增益卡牌前置
         flex_card = next(
             (c for c in playable_cards if c.cost == 0 and ("flex" in c.name.lower() or "strength" in (c.description or "").lower())),
             None,
@@ -412,7 +518,7 @@ class JevSpireAgent:
             target = alive_monsters[0].index if (flex_card.has_target or flex_card.target_type == "ENEMY") else None
             return PlayCardAction.create(flex_card.index, target)
 
-        # 2. 计算未格挡伤害与防御需求
+        # 3. 计算未格挡伤害与防御需求
         total_incoming = sum(
             m.move_damage * max(1, m.move_hits)
             for m in alive_monsters
@@ -426,7 +532,7 @@ class JevSpireAgent:
                 best_block = max(block_cards, key=lambda c: c.block)
                 return PlayCardAction.create(best_block.index, None)
 
-        # 3. 易伤卡牌前置（若目标未处于易伤状态且后续还有攻击牌）
+        # 4. 易伤卡牌前置（若目标未处于易伤状态且后续还有攻击牌）
         if len(playable_attacks) >= 2 and alive_monsters:
             target_enemy = alive_monsters[0]
             is_vulnerable = any(pw.id == "Vulnerable" and pw.amount > 0 for pw in target_enemy.powers)
@@ -437,7 +543,7 @@ class JevSpireAgent:
                     target = target_enemy.index if (best_vuln.has_target or best_vuln.target_type == "ENEMY") else None
                     return PlayCardAction.create(best_vuln.index, target)
 
-        # 4. 攻击牌：优先选择伤害最高的攻击
+        # 5. 攻击牌：优先选择伤害最高的攻击
         if playable_attacks:
             best_atk = max(playable_attacks, key=lambda c: c.damage)
             target = alive_monsters[0].index if (best_atk.has_target or best_atk.target_type == "ENEMY") else None

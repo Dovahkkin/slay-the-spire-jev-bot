@@ -54,6 +54,13 @@ class StateCompressor:
             threat_str += f" (Current Block: {p.block} -> FULLY BLOCKED)"
         lines.append(threat_str)
 
+        # 检查本回合手牌攻击力是否足以斩杀任一存活敌人
+        total_atk_dmg = sum(c.damage for c in state.playable_cards if c.type == "ATTACK")
+        for m in state.alive_monsters:
+            eff_hp = m.current_hp + m.block
+            if total_atk_dmg >= eff_hp > 0:
+                lines.append(f"*** LETHAL WINDOW: E{m.index} ({m.name}) has {eff_hp} HP which is <= total hand attack damage ({total_atk_dmg} dmg)! ATTACK TO KILL! ***")
+
         # 3. Playable Hand
         lines.append("PLAYABLE_CARDS:")
         playable = state.playable_cards

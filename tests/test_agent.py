@@ -244,6 +244,42 @@ class TestSpireAgent(unittest.TestCase):
         self.assertIn("[VULNERABLE DEBUFF (+50% DMG)]", dsl)
 
 
+    def test_multi_card_combo_lethal_never_defends(self):
+        """测试多卡连击斩杀：怪物有11血且正发动高伤攻击，手牌有2张打击+1张防御，必须进攻打出打击，绝不能怂着防御！"""
+        strike1 = Card(index=0, id="Strike_R", name="Strike", cost=1, type="ATTACK", target_type="ENEMY", damage=6)
+        strike2 = Card(index=1, id="Strike_R", name="Strike", cost=1, type="ATTACK", target_type="ENEMY", damage=6)
+        defend = Card(index=2, id="Defend_R", name="Defend", cost=1, type="SKILL", target_type="SELF", block=5)
+
+        # 怪物蓄力攻击 14 点，单张 Strike(6) 无法单卡斩杀，但 2 张 Strike(6+6=12) 可以连击直接带走
+        m = Monster(index=0, id="JawWorm", name="Jaw Worm", current_hp=11, max_hp=42, block=0, intent="ATTACK", move_damage=14)
+        player = Player(current_hp=30, max_hp=80, energy=2, block=0)
+        state = CombatState(turn=1, player=player, monsters=[m], hand=[strike1, strike2, defend])
+
+        agent = JevSpireAgent(enable_deterministic_lethal=True)
+        act = agent.decide_action(state)
+
+        # 绝对不能打防御！死人没有输出，必须打出打击斩杀！
+        self.assertIsInstance(act, PlayCardAction)
+        self.assertIn(act.card_index, [0, 1], "在多卡连击能斩杀怪物的回合，绝不能贪防御，必须打出攻击牌斩杀！")
+
+    def test_bash_vulnerable_combo_lethal(self):
+        """测试痛击(Bash)+易伤加成+打击斩杀：怪物17血，打出痛击(8)+易伤后打击(9)=17斩杀，必须优先出痛击"""
+        bash = Card(index=0, id="Bash", name="Bash", cost=2, type="ATTACK", target_type="ENEMY", damage=8, description="Deal 8 damage. Apply 2 Vulnerable.")
+        strike = Card(index=1, id="Strike_R", name="Strike", cost=1, type="ATTACK", target_type="ENEMY", damage=6)
+        defend = Card(index=2, id="Defend_R", name="Defend", cost=1, type="SKILL", target_type="SELF", block=5)
+
+        m = Monster(index=0, id="Cultist", name="Cultist", current_hp=17, max_hp=48, block=0, intent="ATTACK", move_damage=10)
+        player = Player(current_hp=40, max_hp=80, energy=3, block=0)
+        state = CombatState(turn=1, player=player, monsters=[m], hand=[bash, strike, defend])
+
+        agent = JevSpireAgent(enable_deterministic_lethal=True)
+        act = agent.decide_action(state)
+
+        # 必须优先打出 Bash 上易伤
+        self.assertIsInstance(act, PlayCardAction)
+        self.assertEqual(act.card_index, 0, "必须打出 Bash 作为连击斩杀第一手！")
+
+
 if __name__ == "__main__":
     unittest.main()
 
