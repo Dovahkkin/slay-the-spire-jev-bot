@@ -1,0 +1,20 @@
+# Python 虚拟环境与缓存
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 隐私环境变量文件（绝不提交）
+.env
+.env.local
+.env.*.local
+
+# 操作系统与 IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# 运行临时日志
+*.log
