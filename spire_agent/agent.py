@@ -27,6 +27,7 @@ from .models import (
 )
 
 from .compressor import StateCompressor
+from .hud import DummyHud
 
 try:
     import httpx2
@@ -51,11 +52,13 @@ class JevSpireAgent:
         model: Optional[str] = None,
         proxy: Optional[str] = None,
         enable_deterministic_lethal: bool = True,
+        hud: Optional[Any] = None,
     ):
         self.api_key = api_key or os.environ.get("TYPESAFE_API_KEY")
         self.base_url = base_url or os.environ.get("TYPESAFE_BASE_URL")
         self.model = model or os.environ.get("TYPESAFE_DEFAULT_MODEL")
         self.enable_deterministic_lethal = enable_deterministic_lethal
+        self.hud = hud or DummyHud()
         self.skipped_cards = False  # 记录当前战斗结算中是否已执行过跳过抓牌 (Skip)
         self.skipped_potions = False  # 记录当前战斗结算中是否因药水栏满跳过药水拾取
         self.current_floor = 0
@@ -121,12 +124,27 @@ class JevSpireAgent:
             lethal_action = self._check_deterministic_lethal(state, playable_cards, alive_monsters)
             if lethal_action:
                 logger.info(f"[确定性斩杀触发] 指令: {lethal_action.raw_command}")
+                target_m = alive_monsters[0]
+                self.hud.say(
+                    thought=f"【连击斩杀】推演完毕！手牌攻击力可消灭敌方，全力出击终结威胁！",
+                    action=f"▶ {lethal_action.raw_command}",
+                    status=f"玩家 HP: {state.player.current_hp}/{state.player.max_hp} | 能量: {state.player.energy} | 目标: {target_m.name}",
+                    badge="⚡ 终结斩杀",
+                    badge_color="#ff4757",
+                )
                 return lethal_action
 
         # 3. 确定性前置时序引擎（0费无损力量增益/过牌展开优先打出，避免时序倒挂）
         setup_action = self._check_deterministic_setup(state, playable_cards, alive_monsters)
         if setup_action:
             logger.info(f"[时序优化前置触发] 指令: {setup_action.raw_command}")
+            self.hud.say(
+                thought="【时序优化】优先打出 0 费增益/过牌展开手牌，赋能后续出牌！",
+                action=f"▶ {setup_action.raw_command}",
+                status=f"玩家 HP: {state.player.current_hp}/{state.player.max_hp} | 能量: {state.player.energy}",
+                badge="✦ 前置增益",
+                badge_color="#00f0ff",
+            )
             return setup_action
 
         # 4. 状态文本压缩（DSL）
@@ -461,6 +479,13 @@ class JevSpireAgent:
         logger.info(f"Jev 选择动作: {chosen_key} (Confidence: {card_ans.confidence:.2f})")
 
         if chosen_key == "end_turn":
+            self.hud.say(
+                thought="Jev 判定当前局面结束回合最稳妥，保存状态。",
+                action="▶ END_TURN",
+                status=f"玩家 HP: {state.player.current_hp}/{state.player.max_hp} | 能量: {state.player.energy}",
+                badge="⏳ 结束回合",
+                badge_color="#747d8c",
+            )
             return EndTurnAction.create()
 
         # 解析 card_<index>
@@ -481,7 +506,17 @@ class JevSpireAgent:
                 else:
                     target_idx = 0
 
-            return PlayCardAction.create(selected_card.index, target_idx)
+            action = PlayCardAction.create(selected_card.index, target_idx)
+            threat_txt = f" (战场威胁 {threat_score.score:.1f})" if threat_score else ""
+            target_desc = f" -> E{target_idx}" if target_idx is not None else ""
+            self.hud.say(
+                thought=f"Jev 决策: 选择打出 [{selected_card.name}]{threat_txt}，置信度 {card_ans.confidence:.2f}",
+                action=f"▶ {action.raw_command} ({selected_card.name}{target_desc})",
+                status=f"玩家 HP: {state.player.current_hp}/{state.player.max_hp} | 能量: {state.player.energy}",
+                badge="🧠 JEV决策",
+                badge_color="#2ed573",
+            )
+            return action
         except Exception as e:
             logger.error(f"解析动作异常: {e}，默认结束回合。")
             return EndTurnAction.create()
@@ -597,10 +632,25 @@ class JevSpireAgent:
                     logger.info(f"--> [Jev 选牌决策]: {choice_key} (置信度: {pick_ans.confidence:.2f})")
                     if choice_key == "skip":
                         self.skipped_cards = True
+                        self.hud.say(
+                            thought="Jev 评估当前候选卡牌与卡组相性平平，主动跳过 (Skip) 避免稀释卡组！",
+                            action="▶ CANCEL (Skip)",
+                            status="阶段: 战利品抓牌",
+                            badge="🃏 跳过抓牌",
+                            badge_color="#ffa502",
+                        )
                         return CancelAction.create()
                     if choice_key.startswith("card_"):
                         self.skipped_cards = False
                         pick_idx = int(choice_key.split("_")[1])
+                        c = offered_cards[pick_idx]
+                        self.hud.say(
+                            thought=f"Jev 决策: 选中 [{c.name}] 加入卡组！(置信度: {pick_ans.confidence:.2f})",
+                            action=f"▶ CHOOSE {pick_idx} ({c.name})",
+                            status="阶段: 战利品抓牌",
+                            badge="🃏 选中卡牌",
+                            badge_color="#a55eea",
+                        )
                         return ChooseAction.create(pick_idx)
             except Exception as e:
                 logger.warning(f"Jev 选牌 API 调用失败 ({e})，降级使用启发式选牌。")
@@ -672,7 +722,16 @@ class JevSpireAgent:
                 ans = res.answers.get("path_choice")
                 if ans and ans.choice.startswith("node_"):
                     pick_idx = int(ans.choice.split("_")[1])
+                    chosen_node = next_nodes[pick_idx]
+                    symbol = getattr(chosen_node, "symbol", chosen_node.get("symbol", "?") if isinstance(chosen_node, dict) else "?")
                     logger.info(f"--> [Jev 地图决策]: 选择节点 #{pick_idx} ({ans.choice}, 置信度: {ans.confidence:.2f})")
+                    self.hud.say(
+                        thought=f"Jev 路线规划: 选择房间 [{symbol}]，兼顾生存与战力发育！",
+                        action=f"▶ CHOOSE {pick_idx}",
+                        status=f"第 {act} 幕 第 {floor} 层 | HP: {current_hp}/{max_hp} ({int(current_hp/max_hp*100)}%)",
+                        badge="🗺️ 地图导航",
+                        badge_color="#ffa502",
+                    )
                     return ChooseAction.create(pick_idx)
             except Exception as e:
                 logger.warning(f"Jev 地图导航 API 调用失败 ({e})，降级使用启发式选路。")

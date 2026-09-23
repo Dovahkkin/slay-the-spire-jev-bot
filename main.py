@@ -24,6 +24,8 @@ from spire_agent import (
     StateCompressor,
     PlayCardAction,
     EndTurnAction,
+    SpireHud,
+    DummyHud,
 )
 
 
@@ -109,13 +111,30 @@ def main():
         default=None,
         help="TypeSafe 模型名称 (默认自动根据 Key 识别，官方为 jev-latest，Vercel 为 typesafe-ai/jev)",
     )
+    parser.add_argument(
+        "--hud",
+        dest="hud",
+        action="store_true",
+        default=True,
+        help="开启游戏置顶透明悬浮窗 (AI 战术 HUD，默认开启)",
+    )
+    parser.add_argument(
+        "--no-hud",
+        dest="hud",
+        action="store_false",
+        help="关闭游戏置顶透明悬浮窗 (纯后台运行)",
+    )
     args = parser.parse_args()
 
-    # 初始化 Agent（自动挂载 .env 和 proxy）
+    # 初始化 HUD 悬浮窗
+    hud = SpireHud() if args.hud else DummyHud()
+
+    # 初始化 Agent（自动挂载 .env 和 proxy 以及 HUD）
     agent = JevSpireAgent(
         api_key=args.api_key,
         proxy=args.proxy,
         model=args.model,
+        hud=hud,
     )
 
     if args.driver == "live":

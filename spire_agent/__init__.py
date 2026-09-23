@@ -23,6 +23,7 @@ from .models import (
 from .compressor import StateCompressor
 from .agent import JevSpireAgent
 from .driver import BaseGameDriver, MockGameDriver, CommunicationModDriver
+from .hud import SpireHud, DummyHud
 
 __all__ = [
     "CombatState",
@@ -50,6 +51,8 @@ __all__ = [
     "BaseGameDriver",
     "MockGameDriver",
     "CommunicationModDriver",
+    "SpireHud",
+    "DummyHud",
 ]
 
 
