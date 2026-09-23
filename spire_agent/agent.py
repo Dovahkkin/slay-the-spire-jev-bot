@@ -50,6 +50,7 @@ class JevSpireAgent:
         self.base_url = base_url or os.environ.get("TYPESAFE_BASE_URL")
         self.model = model or os.environ.get("TYPESAFE_DEFAULT_MODEL")
         self.enable_deterministic_lethal = enable_deterministic_lethal
+        self.skipped_cards = False  # 记录当前战斗结算中是否已执行过跳过抓牌 (Skip)
 
         # 智能识别 Vercel AI Gateway 凭证 (vck_...)
         if self.api_key and self.api_key.strip().startswith("vck_"):
@@ -341,19 +342,23 @@ class JevSpireAgent:
                     choice_key = pick_ans.choice
                     logger.info(f"--> [Jev 选牌决策]: {choice_key} (置信度: {pick_ans.confidence:.2f})")
                     if choice_key == "skip":
+                        self.skipped_cards = True
                         return CancelAction.create()
                     if choice_key.startswith("card_"):
+                        self.skipped_cards = False
                         pick_idx = int(choice_key.split("_")[1])
                         return ChooseAction.create(pick_idx)
             except Exception as e:
                 logger.warning(f"Jev 选牌 API 调用失败 ({e})，降级使用启发式选牌。")
 
         # 启发式兜底：优先挑选伤害最高的攻击牌或优质防御牌
+        self.skipped_cards = False
         attacks = [c for c in offered_cards if c.type == "ATTACK"]
         if attacks:
             best_atk = max(attacks, key=lambda c: c.damage)
             return ChooseAction.create(best_atk.index)
         return ChooseAction.create(0)
+
 
     def decide_map_route(
         self,
@@ -462,14 +467,18 @@ class JevSpireAgent:
                     logger.info(f"自动拾取战利品药水 (索引 #{idx})")
                     return ChooseAction.create(idx)
 
-            # 3. 点击卡牌奖励进入选牌界面
+            # 3. 点击卡牌奖励进入选牌界面（若尚未选择跳过）
             for idx, r in enumerate(raw_rewards):
                 rtype = str(r.get("reward_type", "")).upper()
                 if rtype == "CARD":
+                    if self.skipped_cards:
+                        logger.info("本场卡牌奖励此前已被 Jev 跳过 (Skip)，不再重复开启，准备继续前进。")
+                        continue
                     logger.info(f"开启卡牌奖励界面 (索引 #{idx})")
                     return ChooseAction.create(idx)
 
-            # 4. 全部处理完成，推进
+            # 4. 全部处理完成（或已跳过卡牌），推进
+            self.skipped_cards = False
             return ProceedAction.create()
 
         elif st == "CARD_REWARD":
@@ -492,7 +501,9 @@ class JevSpireAgent:
             return self.decide_card_reward(game_state.deck, game_state.relics, offered, can_skip)
 
         elif st == "MAP":
+            self.skipped_cards = False
             next_nodes = game_state.screen_state.get("next_nodes", [])
+
             boss_available = game_state.screen_state.get("boss_available", False)
             return self.decide_map_route(
                 current_hp=game_state.current_hp,

@@ -1,4 +1,5 @@
 import sys
+import time
 import json
 import logging
 from abc import ABC, abstractmethod
@@ -359,6 +360,7 @@ class CommunicationModDriver(BaseGameDriver):
         logger.info(f"[发送游戏指令]: {action.raw_command}")
         sys.stdout.write(f"{action.raw_command}\n")
         sys.stdout.flush()
+        time.sleep(0.08)
         return self.get_full_state()
 
     def is_game_over(self) -> bool:
