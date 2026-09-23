@@ -82,6 +82,50 @@ class TestSpireAgent(unittest.TestCase):
 
         self.assertTrue(driver.is_combat_over(), "残血战局应当在几步内完成击杀！")
 
+    def test_card_reward_and_looting(self):
+        agent = JevSpireAgent()
+        from spire_agent import FullGameState, ChooseAction, ProceedAction
+
+        # 测试自动拾取金币与遗物
+        reward_state = FullGameState(
+            screen_type="COMBAT_REWARD",
+            screen_state={"rewards": [{"reward_type": "GOLD", "gold": 25}, {"reward_type": "CARD"}]},
+            available_commands=["choose", "proceed"],
+        )
+        act = agent.decide_screen_action(reward_state)
+        self.assertIsInstance(act, ChooseAction)
+        self.assertEqual(act.choice, "0")  # 优先拾取索引 0 的金币
+
+        # 测试选牌决策
+        cards = [
+            Card(index=0, id="Carnage", name="Carnage", cost=2, type="ATTACK", damage=20),
+            Card(index=1, id="Defend", name="Defend", cost=1, type="SKILL", block=5),
+        ]
+        card_act = agent.decide_card_reward(deck=self.cards, relics=["Burning Blood"], offered_cards=cards)
+        self.assertTrue(card_act.action_type in ["choose", "cancel"])
+
+    def test_map_route_decision(self):
+        agent = JevSpireAgent()
+        from spire_agent import ChooseAction
+
+        # 测试地图路线选择
+        next_nodes = [
+            {"x": 1, "y": 2, "symbol": "M"},
+            {"x": 2, "y": 2, "symbol": "R"},
+        ]
+        # 残血时偏好营地 (R)
+        act = agent.decide_map_route(current_hp=15, max_hp=80, gold=50, floor=2, act=1, next_nodes=next_nodes)
+        self.assertIsInstance(act, ChooseAction)
+
+    def test_full_run_mock_loop(self):
+        from main import run_game_loop
+        driver = MockGameDriver(scenario="lethal")
+        agent = JevSpireAgent()
+        # 验证完整全流程：战斗斩杀 -> 拾取金币 -> 进入选牌 -> 挑选路线
+        run_game_loop(agent, driver, max_steps=20)
+        self.assertTrue(driver.is_game_over(), "完整模拟生命周期应顺利走完！")
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -179,3 +179,139 @@ class StateCompressor:
             discard_pile_count=len(combat_state.get("discard_pile", [])),
             exhaust_pile_count=len(combat_state.get("exhaust_pile", [])),
         )
+
+    @staticmethod
+    def compress_card_reward(
+        deck: List[Card],
+        relics: List[str],
+        offered_cards: List[Card],
+        can_skip: bool = True,
+    ) -> str:
+        """
+        将选牌界面的卡组信息与候选卡牌压缩为紧凑 DSL。
+        """
+        lines: List[str] = []
+        lines.append("=== CARD REWARD SELECTION ===")
+
+        # 统计卡组简况
+        deck_names = [c.name for c in deck]
+        from collections import Counter
+        card_counts = Counter(deck_names)
+        deck_summary_parts = [f"{name} x{cnt}" if cnt > 1 else name for name, cnt in card_counts.most_common(8)]
+        deck_str = ", ".join(deck_summary_parts) if deck_summary_parts else "Starter deck"
+
+        lines.append(f"CURRENT DECK ({len(deck)} cards): [{deck_str}]")
+        relics_str = f"[{', '.join(relics[:6])}]" if relics else "none"
+        lines.append(f"RELICS: {relics_str}")
+
+        lines.append("OFFERED CARDS:")
+        for idx, c in enumerate(offered_cards):
+            effs: List[str] = []
+            if c.damage > 0:
+                effs.append(f"{c.damage} dmg")
+            if c.block > 0:
+                effs.append(f"{c.block} blk")
+            if c.description:
+                effs.append(c.description)
+            eff_desc = ", ".join(effs) if effs else "Special"
+            lines.append(f"* [{idx}] {c.name} ({c.cost}E, {c.type}) -> {eff_desc}")
+
+        options = [f"card_{idx}" for idx in range(len(offered_cards))]
+        if can_skip:
+            options.append("skip")
+        lines.append(f"OPTIONS: {', '.join(options)}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def compress_map_selection(
+        current_hp: int,
+        max_hp: int,
+        gold: int,
+        floor: int,
+        act: int,
+        next_nodes: List[Any],
+        boss_available: bool = False,
+    ) -> str:
+        """
+        将地图路径分支压缩为紧凑 DSL。
+        """
+        lines: List[str] = []
+        lines.append(f"=== MAP ROUTE NAVIGATION (Act {act}, Floor {floor}) ===")
+        hp_pct = int((current_hp / max_hp * 100)) if max_hp > 0 else 0
+        lines.append(f"PLAYER STATUS: HP {current_hp}/{max_hp} ({hp_pct}%) | Gold {gold}")
+
+        lines.append("AVAILABLE PATHS:")
+        if boss_available:
+            lines.append("* [boss] ACT BOSS ROOM (Proceed to climax)")
+        else:
+            for idx, node in enumerate(next_nodes):
+                symbol = getattr(node, "symbol", node.get("symbol", "?") if isinstance(node, dict) else "?")
+                desc = getattr(node, "description", symbol)
+                lines.append(f"* [node_{idx}] {desc} (coords: x={getattr(node, 'x', '?')}, y={getattr(node, 'y', '?')})")
+
+        return "\n".join(lines)
+
+    @classmethod
+    def from_communication_mod_full_json(cls, raw: Dict[str, Any]) -> "FullGameState":
+        """
+        从 CommunicationMod 全局 JSON 解析为 FullGameState。
+        """
+        from .models import FullGameState, Card, Potion, MapNode
+
+        game_state = raw.get("game_state", raw)
+        screen_type = game_state.get("screen_type", "NONE")
+        screen_state = game_state.get("screen_state", {})
+
+        # 卡组
+        deck: List[Card] = []
+        for idx, c in enumerate(game_state.get("deck", [])):
+            deck.append(
+                Card(
+                    index=idx,
+                    id=c.get("id", ""),
+                    name=c.get("name", f"Card_{idx}"),
+                    cost=c.get("cost", 1),
+                    type=c.get("type", "SKILL"),
+                    damage=c.get("damage", 0),
+                    block=c.get("block", 0),
+                    description=c.get("raw_description", ""),
+                    upgraded=c.get("upgrades", 0) > 0,
+                )
+            )
+
+        # 遗物与药水
+        relics = [r.get("name", r.get("id", "")) for r in game_state.get("relics", [])]
+        potions: List[Potion] = [
+            Potion(
+                index=idx,
+                id=pot.get("id", ""),
+                name=pot.get("name", f"Potion_{idx}"),
+                can_use=pot.get("can_use", False),
+                requires_target=pot.get("requires_target", False),
+            )
+            for idx, pot in enumerate(game_state.get("potions", []))
+        ]
+
+        # 战斗状态切片
+        combat_state = None
+        if "combat_state" in game_state and game_state.get("combat_state"):
+            combat_state = cls.from_communication_mod_json(raw)
+
+        return FullGameState(
+            screen_type=screen_type,
+            screen_state=screen_state,
+            available_commands=raw.get("available_commands", []),
+            ready_for_command=raw.get("ready_for_command", True),
+            in_game=raw.get("in_game", True),
+            floor=game_state.get("floor", 0),
+            act=game_state.get("act", 1),
+            gold=game_state.get("gold", 0),
+            current_hp=game_state.get("current_hp", 0),
+            max_hp=game_state.get("max_hp", 0),
+            deck=deck,
+            relics=relics,
+            potions=potions,
+            combat_state=combat_state,
+            is_screen_up=game_state.get("is_screen_up", False),
+        )
+

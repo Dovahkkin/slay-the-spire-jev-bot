@@ -88,9 +88,60 @@ class CombatState(BaseModel):
         return [c for c in self.hand if c.is_playable and c.cost <= self.player.energy]
 
 
-# --- 结构化出牌指令 ---
+# --- 非战斗屏幕与全屏状态模型 ---
+class RewardItem(BaseModel):
+    index: int
+    reward_type: str  # GOLD, POTION, CARD, RELIC, STOLEN_GOLD, SAPPHIRE_KEY, etc.
+    gold: int = 0
+    potion: Optional[Dict[str, Any]] = None
+    relic: Optional[Dict[str, Any]] = None
+    link: Optional[Dict[str, Any]] = None
+
+
+class MapNode(BaseModel):
+    x: int
+    y: int
+    symbol: str  # M, ?, E, R, $, T, etc.
+
+    @property
+    def description(self) -> str:
+        symbol_map = {
+            "M": "Monster (Normal Enemy)",
+            "?": "Event (Unknown ? Room)",
+            "E": "Elite (Dangerous, Relic reward)",
+            "R": "Rest Site (Campfire - Heal/Upgrade)",
+            "$": "Shop (Merchant)",
+            "T": "Treasure (Chest)",
+        }
+        return symbol_map.get(self.symbol, f"Room '{self.symbol}'")
+
+
+class FullGameState(BaseModel):
+    """通信层完整全局状态帧"""
+    screen_type: str = "NONE"
+    screen_state: Dict[str, Any] = Field(default_factory=dict)
+    available_commands: List[str] = Field(default_factory=list)
+    ready_for_command: bool = True
+    in_game: bool = True
+    floor: int = 0
+    act: int = 1
+    gold: int = 0
+    current_hp: int = 0
+    max_hp: int = 0
+    deck: List[Card] = Field(default_factory=list)
+    relics: List[str] = Field(default_factory=list)
+    potions: List[Potion] = Field(default_factory=list)
+    combat_state: Optional[CombatState] = None
+    is_screen_up: bool = False
+
+    @property
+    def in_combat(self) -> bool:
+        return self.combat_state is not None and not self.is_screen_up and len(self.combat_state.alive_monsters) > 0
+
+
+# --- 结构化游戏指令 ---
 class BaseAction(BaseModel):
-    action_type: Literal["play", "potion", "end_turn"]
+    action_type: Literal["play", "potion", "end_turn", "choose", "proceed", "cancel"]
     raw_command: str
 
 
@@ -124,3 +175,29 @@ class EndTurnAction(BaseAction):
     @classmethod
     def create(cls) -> "EndTurnAction":
         return cls(raw_command="END")
+
+
+class ChooseAction(BaseAction):
+    action_type: Literal["choose"] = "choose"
+    choice: str
+
+    @classmethod
+    def create(cls, choice: Any) -> "ChooseAction":
+        return cls(raw_command=f"CHOOSE {choice}", choice=str(choice))
+
+
+class ProceedAction(BaseAction):
+    action_type: Literal["proceed"] = "proceed"
+
+    @classmethod
+    def create(cls) -> "ProceedAction":
+        return cls(raw_command="PROCEED")
+
+
+class CancelAction(BaseAction):
+    action_type: Literal["cancel"] = "cancel"
+
+    @classmethod
+    def create(cls) -> "CancelAction":
+        return cls(raw_command="CANCEL")
+

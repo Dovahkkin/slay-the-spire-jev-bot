@@ -26,37 +26,53 @@ from spire_agent import (
 )
 
 
-def run_combat_loop(agent: JevSpireAgent, driver, max_steps: int = 150):
+def run_game_loop(agent: JevSpireAgent, driver, max_steps: int = 500):
     """
-    微步战斗主循环：
-    首次获取战局 -> 循环决策 -> 发送动作并获取下一瞬状态 -> 持续执行直至战斗结束。
+    全生命周期主循环：
+    根据游戏全局状态（战斗中、战利品界面、选牌界面、地图路线、营地、事件）自动派发决策。
     """
     step = 1
-    # 首次获取战局状态
-    current_state = driver.get_current_state()
+    full_state = driver.get_full_state()
 
-    while current_state is not None and not driver.is_combat_over() and step <= max_steps:
+    while full_state is not None and not driver.is_game_over() and step <= max_steps:
         print("\n" + "=" * 60, file=sys.stderr)
-        logger.info(f"--- [微步决策 Micro-step #{step}] ---")
 
-        # 打印当前压缩后的高密度 DSL（仅输出到 stderr）
-        dsl_text = StateCompressor.compress(current_state)
-        print("\n[当前状态压缩 DSL 预览]:", file=sys.stderr)
-        print(dsl_text, file=sys.stderr)
-        print("-" * 40, file=sys.stderr)
+        # 1. 处于战斗阶段
+        if full_state.in_combat and full_state.combat_state is not None:
+            combat_state = full_state.combat_state
+            logger.info(f"--- [战斗微步 Micro-step #{step} | 回合 {combat_state.turn}] ---")
 
-        # Agent 裁决
-        action = agent.decide_action(current_state)
-        logger.info(f"--> [Agent 决策输出]: {action.raw_command} (类型: {action.action_type})")
+            # 打印当前战斗压缩 DSL
+            dsl_text = StateCompressor.compress(combat_state)
+            print("\n[战斗状态压缩 DSL 预览]:", file=sys.stderr)
+            print(dsl_text, file=sys.stderr)
+            print("-" * 40, file=sys.stderr)
 
-        # 发送动作至游戏，并直接读取游戏执行后回传的下一个战局状态
-        current_state = driver.send_action(action)
+            # Agent 战斗出牌决策
+            action = agent.decide_action(combat_state)
+            logger.info(f"--> [Agent 战斗出牌]: {action.raw_command} ({action.action_type})")
+            full_state = driver.send_full_action(action)
+
+        # 2. 处于非战斗阶段（战利品结算、选牌、地图、营地、事件等）
+        else:
+            screen_name = full_state.screen_type if full_state.screen_type != "NONE" else "DUNGEON"
+            logger.info(f"--- [非战斗流程 Step #{step} | 界面: {screen_name}] ---")
+            action = agent.decide_screen_action(full_state)
+            logger.info(f"--> [Agent 流程指令]: {action.raw_command} ({action.action_type})")
+            full_state = driver.send_full_action(action)
+
         step += 1
 
-    if driver.is_combat_over():
-        logger.info("战斗顺利结束或通信断开！")
+    if driver.is_game_over():
+        logger.info("游戏阶段结束或与游戏通信断开。")
     else:
-        logger.info("达到最大单场步数限制，循环终止。")
+        logger.info("达到最大步数限制，主循环终止。")
+
+
+def run_combat_loop(agent: JevSpireAgent, driver, max_steps: int = 150):
+    """兼容旧接口"""
+    run_game_loop(agent, driver, max_steps=max_steps)
+
 
 
 def main():
@@ -104,7 +120,7 @@ def main():
         logger.info(f"启动本地沙盒驱动 (场景: {args.scenario})...")
         driver = MockGameDriver(scenario=args.scenario)
 
-    run_combat_loop(agent, driver)
+    run_game_loop(agent, driver)
 
 
 if __name__ == "__main__":

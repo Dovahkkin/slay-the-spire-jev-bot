@@ -8,12 +8,17 @@ load_dotenv()
 
 from .models import (
     CombatState,
+    FullGameState,
     BaseAction,
     PlayCardAction,
     EndTurnAction,
     UsePotionAction,
+    ChooseAction,
+    ProceedAction,
+    CancelAction,
     Card,
     Monster,
+    MapNode,
 )
 from .compressor import StateCompressor
 
@@ -292,3 +297,257 @@ class JevSpireAgent:
         first_card = playable_cards[0]
         target = alive_monsters[0].index if (first_card.has_target or first_card.target_type == "ENEMY") else None
         return PlayCardAction.create(first_card.index, target)
+
+    def decide_card_reward(
+        self,
+        deck: List[Card],
+        relics: List[str],
+        offered_cards: List[Card],
+        can_skip: bool = True,
+    ) -> BaseAction:
+        """
+        Jev 选牌决策：
+        利用 Choice 原语评估当前卡组构筑需求与候选卡牌，支持主动放弃 (Skip)。
+        """
+        if not offered_cards:
+            logger.info("无候选卡牌可选，跳过/确认。")
+            return CancelAction.create()
+
+        # 压缩状态 DSL
+        compressed = StateCompressor.compress_card_reward(deck, relics, offered_cards, can_skip)
+        logger.info(f"\n[选牌状态压缩 DSL]:\n{compressed}")
+
+        # 构建 Choice 候选选项
+        criteria: Dict[str, str] = {}
+        for idx, c in enumerate(offered_cards):
+            eff_desc = f"{c.name} ({c.cost}E, {c.type}): {c.description or ('Dmg: ' + str(c.damage))}"
+            criteria[f"card_{idx}"] = eff_desc
+
+        if can_skip:
+            criteria["skip"] = "Skip card reward: avoid diluting the deck with mediocre cards to keep high card draw consistency."
+
+        if HAS_TYPESAFE_SDK and self.client:
+            try:
+                card_question = Choice(
+                    instructions="Given the player's deck and relics, which card best improves deck synergy and survivability, or should the reward be skipped?",
+                    criteria=criteria,
+                )
+                res = self.client.system_one(
+                    state=compressed,
+                    questions={"card_pick": card_question},
+                )
+                pick_ans = res.answers.get("card_pick")
+                if pick_ans:
+                    choice_key = pick_ans.choice
+                    logger.info(f"--> [Jev 选牌决策]: {choice_key} (置信度: {pick_ans.confidence:.2f})")
+                    if choice_key == "skip":
+                        return CancelAction.create()
+                    if choice_key.startswith("card_"):
+                        pick_idx = int(choice_key.split("_")[1])
+                        return ChooseAction.create(pick_idx)
+            except Exception as e:
+                logger.warning(f"Jev 选牌 API 调用失败 ({e})，降级使用启发式选牌。")
+
+        # 启发式兜底：优先挑选伤害最高的攻击牌或优质防御牌
+        attacks = [c for c in offered_cards if c.type == "ATTACK"]
+        if attacks:
+            best_atk = max(attacks, key=lambda c: c.damage)
+            return ChooseAction.create(best_atk.index)
+        return ChooseAction.create(0)
+
+    def decide_map_route(
+        self,
+        current_hp: int,
+        max_hp: int,
+        gold: int,
+        floor: int,
+        act: int,
+        next_nodes: List[Any],
+        boss_available: bool = False,
+    ) -> BaseAction:
+        """
+        Jev 地图路径决策：
+        利用 Choice 原语根据生命百分比、金币与层数权衡各分支风险与收益。
+        """
+        if boss_available:
+            logger.info("--> [地图决策]: Boss 房间已解锁，发起 Boss 决战！")
+            return ChooseAction.create("boss")
+
+        if not next_nodes:
+            logger.info("--> [地图决策]: 无可选节点，默认推进。")
+            return ChooseAction.create(0)
+
+        if len(next_nodes) == 1:
+            logger.info("--> [地图决策]: 仅单一路线可选，直接前进。")
+            return ChooseAction.create(0)
+
+        # 压缩状态 DSL
+        compressed = StateCompressor.compress_map_selection(
+            current_hp, max_hp, gold, floor, act, next_nodes, boss_available
+        )
+        logger.info(f"\n[地图导航压缩 DSL]:\n{compressed}")
+
+        criteria: Dict[str, str] = {}
+        for idx, n in enumerate(next_nodes):
+            symbol = getattr(n, "symbol", n.get("symbol", "?") if isinstance(n, dict) else "?")
+            symbol_desc = {
+                "M": "Monster (Normal Enemy) - Low risk, earns gold and cards",
+                "?": "Event (? Room) - Unknown event, potential reward or encounter",
+                "E": "Elite - High danger, but drops valuable relics",
+                "R": "Rest Site (Campfire) - Safe recovery (heal 30% HP) or card smithing",
+                "$": "Shop - Buy relics/cards or remove unwanted cards",
+                "T": "Treasure - Free chest rewards",
+            }.get(symbol, f"Room type '{symbol}'")
+            criteria[f"node_{idx}"] = symbol_desc
+
+        if HAS_TYPESAFE_SDK and self.client:
+            try:
+                route_question = Choice(
+                    instructions="Given current HP percentage, gold, and floor, which path node is optimal for survival and progression?",
+                    criteria=criteria,
+                )
+                res = self.client.system_one(
+                    state=compressed,
+                    questions={"path_choice": route_question},
+                )
+                ans = res.answers.get("path_choice")
+                if ans and ans.choice.startswith("node_"):
+                    pick_idx = int(ans.choice.split("_")[1])
+                    logger.info(f"--> [Jev 地图决策]: 选择节点 #{pick_idx} ({ans.choice}, 置信度: {ans.confidence:.2f})")
+                    return ChooseAction.create(pick_idx)
+            except Exception as e:
+                logger.warning(f"Jev 地图导航 API 调用失败 ({e})，降级使用启发式选路。")
+
+        # 启发式兜底：残血优先营地/规避精英
+        hp_ratio = current_hp / max_hp if max_hp > 0 else 1.0
+        for idx, n in enumerate(next_nodes):
+            sym = getattr(n, "symbol", n.get("symbol", "?") if isinstance(n, dict) else "?")
+            if hp_ratio < 0.45 and sym == "R":
+                return ChooseAction.create(idx)
+        return ChooseAction.create(0)
+
+    def decide_screen_action(self, game_state: FullGameState) -> BaseAction:
+        """
+        非战斗屏幕统一动作派发器：
+        自动拾取战利品、触发选牌、触发地图导航、营地休息等。
+        """
+        st = game_state.screen_type.upper()
+        logger.info(f"处理非战斗界面: [{st}]")
+
+        if st == "COMBAT_REWARD":
+            raw_rewards = game_state.screen_state.get("rewards", [])
+            if not raw_rewards:
+                logger.info("战利品已拾取完毕，发送 PROCEED 前进。")
+                return ProceedAction.create()
+
+            # 1. 优先自动拾取金币、被盗金币、遗物、钥匙
+            for idx, r in enumerate(raw_rewards):
+                rtype = str(r.get("reward_type", "")).upper()
+                if rtype in ["GOLD", "STOLEN_GOLD"]:
+                    logger.info(f"自动拾取战利品金币 (索引 #{idx}): {r.get('gold', '')}G")
+                    return ChooseAction.create(idx)
+                if rtype == "RELIC":
+                    logger.info(f"自动拾取战利品遗物 (索引 #{idx})")
+                    return ChooseAction.create(idx)
+                if rtype in ["SAPPHIRE_KEY", "EMERALD_KEY"]:
+                    logger.info(f"自动拾取钥匙 (索引 #{idx})")
+                    return ChooseAction.create(idx)
+
+            # 2. 拾取药水（若药水栏未满）
+            potion_slots = 3  # 默认 3 槽位
+            has_empty_slot = len(game_state.potions) < potion_slots or any(not p.can_use for p in game_state.potions)
+            for idx, r in enumerate(raw_rewards):
+                rtype = str(r.get("reward_type", "")).upper()
+                if rtype == "POTION" and has_empty_slot:
+                    logger.info(f"自动拾取战利品药水 (索引 #{idx})")
+                    return ChooseAction.create(idx)
+
+            # 3. 点击卡牌奖励进入选牌界面
+            for idx, r in enumerate(raw_rewards):
+                rtype = str(r.get("reward_type", "")).upper()
+                if rtype == "CARD":
+                    logger.info(f"开启卡牌奖励界面 (索引 #{idx})")
+                    return ChooseAction.create(idx)
+
+            # 4. 全部处理完成，推进
+            return ProceedAction.create()
+
+        elif st == "CARD_REWARD":
+            raw_cards = game_state.screen_state.get("cards", [])
+            offered: List[Card] = []
+            for idx, c in enumerate(raw_cards):
+                offered.append(
+                    Card(
+                        index=idx,
+                        id=c.get("id", ""),
+                        name=c.get("name", f"Card_{idx}"),
+                        cost=c.get("cost", 1),
+                        type=c.get("type", "SKILL"),
+                        damage=c.get("damage", 0),
+                        block=c.get("block", 0),
+                        description=c.get("raw_description", ""),
+                    )
+                )
+            can_skip = game_state.screen_state.get("skip_available", True)
+            return self.decide_card_reward(game_state.deck, game_state.relics, offered, can_skip)
+
+        elif st == "MAP":
+            next_nodes = game_state.screen_state.get("next_nodes", [])
+            boss_available = game_state.screen_state.get("boss_available", False)
+            return self.decide_map_route(
+                current_hp=game_state.current_hp,
+                max_hp=game_state.max_hp,
+                gold=game_state.gold,
+                floor=game_state.floor,
+                act=game_state.act,
+                next_nodes=next_nodes,
+                boss_available=boss_available,
+            )
+
+        elif st == "REST":
+            # 营地休息处
+            options = [str(opt).upper() for opt in game_state.screen_state.get("rest_options", [])]
+            has_rested = game_state.screen_state.get("has_rested", False)
+            if has_rested or not options:
+                return ProceedAction.create()
+
+            hp_ratio = game_state.current_hp / game_state.max_hp if game_state.max_hp > 0 else 1.0
+            if hp_ratio < 0.5 and "REST" in options:
+                logger.info("玩家生命值低于 50%，在营地选择【休息 (Rest)】恢复生命。")
+                return ChooseAction.create("rest")
+            elif "SMITH" in options:
+                logger.info("玩家生命安全，在营地选择【锻造 (Smith)】强化卡牌。")
+                return ChooseAction.create("smith")
+            elif "REST" in options:
+                return ChooseAction.create("rest")
+            else:
+                return ChooseAction.create(0)
+
+        elif st == "GRID":
+            # 卡牌升级或卡牌选择
+            if game_state.screen_state.get("confirm_up", False):
+                return ProceedAction.create()
+            logger.info("在卡牌列表选择第一张卡牌进行升级/交互。")
+            return ChooseAction.create(0)
+
+        elif st == "CHEST":
+            if game_state.screen_state.get("chest_open", False):
+                return ProceedAction.create()
+            logger.info("打开宝箱...")
+            return ChooseAction.create("open")
+
+        elif st == "EVENT":
+            opts = game_state.screen_state.get("options", [])
+            for idx, opt in enumerate(opts):
+                if not opt.get("disabled", False):
+                    logger.info(f"选择事件选项 #{idx}: {opt.get('text', '')}")
+                    return ChooseAction.create(idx)
+            return ProceedAction.create()
+
+        # 兜底推进逻辑
+        if "proceed" in game_state.available_commands:
+            return ProceedAction.create()
+        if "cancel" in game_state.available_commands:
+            return CancelAction.create()
+        return ProceedAction.create()
+

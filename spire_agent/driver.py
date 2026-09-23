@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List
 from .models import (
     CombatState,
+    FullGameState,
     Player,
     Monster,
     Card,
@@ -13,6 +14,9 @@ from .models import (
     BaseAction,
     PlayCardAction,
     EndTurnAction,
+    ChooseAction,
+    ProceedAction,
+    CancelAction,
 )
 from .compressor import StateCompressor
 
@@ -23,28 +27,62 @@ class BaseGameDriver(ABC):
     """游戏驱动基础接口"""
 
     @abstractmethod
+    def get_full_state(self) -> Optional[FullGameState]:
+        """获取当前全局游戏状态帧"""
+        pass
+
+    @abstractmethod
+    def send_full_action(self, action: BaseAction) -> Optional[FullGameState]:
+        """发送动作并获取更新后的全局状态帧"""
+        pass
+
+    @abstractmethod
+    def is_game_over(self) -> bool:
+        """全局游戏或通信是否彻底结束"""
+        pass
+
     def get_current_state(self) -> Optional[CombatState]:
-        pass
+        """兼容接口：获取当前回合战斗切片"""
+        full = self.get_full_state()
+        return full.combat_state if full else None
 
-    @abstractmethod
     def send_action(self, action: BaseAction) -> Optional[CombatState]:
-        pass
+        """兼容接口：发送动作并返回当前回合战斗切片"""
+        full = self.send_full_action(action)
+        return full.combat_state if full else None
 
-    @abstractmethod
     def is_combat_over(self) -> bool:
-        pass
+        """检查当前战斗是否结束"""
+        full = self.get_full_state()
+        if not full:
+            return True
+        return not full.in_combat
 
 
 class MockGameDriver(BaseGameDriver):
     """
     本地沙盒模拟驱动：
-    无需安装真实游戏，通过离线模拟状态机验证 Jev Agent 的微步决策流与伤害扣减逻辑。
+    模拟完整生命周期：战斗中 -> 战利品结算 (金币/药水) -> 选牌 (Jev 抓牌) -> 大地图路径选择。
     """
 
     def __init__(self, scenario: str = "cultist"):
         self.scenario = scenario
         self.combat_over = False
-        self.state = self._init_scenario(scenario)
+        self.game_finished = False
+        self.phase = "combat"  # combat -> reward -> card_reward -> map -> done
+        self.combat_state = self._init_scenario(scenario)
+        self.gold = 99
+        self.deck = [
+            Card(index=0, id="Strike", name="Strike", cost=1, type="ATTACK", damage=6),
+            Card(index=1, id="Strike", name="Strike", cost=1, type="ATTACK", damage=6),
+            Card(index=2, id="Strike", name="Strike", cost=1, type="ATTACK", damage=6),
+            Card(index=3, id="Defend", name="Defend", cost=1, type="SKILL", block=5),
+            Card(index=4, id="Defend", name="Defend", cost=1, type="SKILL", block=5),
+            Card(index=5, id="Bash", name="Bash", cost=2, type="ATTACK", damage=8),
+        ]
+        self.relics = ["Burning Blood"]
+        self.potions: List[Potion] = []
+        self.screen_rewards = [{"reward_type": "GOLD", "gold": 18}, {"reward_type": "CARD"}]
 
     def _init_scenario(self, scenario: str) -> CombatState:
         if scenario == "lethal":
@@ -92,74 +130,180 @@ class MockGameDriver(BaseGameDriver):
             potions = [Potion(index=0, id="FirePotion", name="Fire Potion", can_use=True, requires_target=True, description="Deal 20 damage")]
             return CombatState(turn=1, player=p, monsters=[m], hand=cards, potions=potions, draw_pile_count=15, discard_pile_count=0)
 
-    def get_current_state(self) -> Optional[CombatState]:
-        return self.state
+    def get_full_state(self) -> Optional[FullGameState]:
+        if self.game_finished:
+            return None
 
-    def send_action(self, action: BaseAction) -> Optional[CombatState]:
-        logger.info(f"[Mock Driver 接收动作]: {action.raw_command}")
+        if self.phase == "combat":
+            return FullGameState(
+                screen_type="NONE",
+                floor=1,
+                act=1,
+                gold=self.gold,
+                current_hp=self.combat_state.player.current_hp,
+                max_hp=self.combat_state.player.max_hp,
+                deck=self.deck,
+                relics=self.relics,
+                potions=self.combat_state.potions,
+                combat_state=self.combat_state,
+                is_screen_up=False,
+                available_commands=["play", "end", "potion"],
+            )
+        elif self.phase == "reward":
+            return FullGameState(
+                screen_type="COMBAT_REWARD",
+                screen_state={"rewards": self.screen_rewards},
+                floor=1,
+                act=1,
+                gold=self.gold,
+                current_hp=self.combat_state.player.current_hp,
+                max_hp=self.combat_state.player.max_hp,
+                deck=self.deck,
+                relics=self.relics,
+                potions=self.potions,
+                is_screen_up=True,
+                available_commands=["choose", "proceed"],
+            )
+        elif self.phase == "card_reward":
+            cards = [
+                {"id": "Carnage", "name": "Carnage", "cost": 2, "type": "ATTACK", "damage": 20, "raw_description": "Ethereal. Deal 20 damage."},
+                {"id": "ShrugItOff", "name": "Shrug It Off", "cost": 1, "type": "SKILL", "block": 8, "raw_description": "Gain 8 Block. Draw 1 card."},
+                {"id": "DemonForm", "name": "Demon Form", "cost": 3, "type": "POWER", "raw_description": "At the start of your turn, gain 2 Strength."},
+            ]
+            return FullGameState(
+                screen_type="CARD_REWARD",
+                screen_state={"cards": cards, "skip_available": True},
+                floor=1,
+                act=1,
+                gold=self.gold,
+                current_hp=self.combat_state.player.current_hp,
+                max_hp=self.combat_state.player.max_hp,
+                deck=self.deck,
+                relics=self.relics,
+                potions=self.potions,
+                is_screen_up=True,
+                available_commands=["choose", "cancel"],
+            )
+        elif self.phase == "map":
+            next_nodes = [
+                {"x": 1, "y": 2, "symbol": "M"},
+                {"x": 2, "y": 2, "symbol": "?"},
+            ]
+            return FullGameState(
+                screen_type="MAP",
+                screen_state={"next_nodes": next_nodes, "boss_available": False},
+                floor=1,
+                act=1,
+                gold=self.gold,
+                current_hp=self.combat_state.player.current_hp,
+                max_hp=self.combat_state.player.max_hp,
+                deck=self.deck,
+                relics=self.relics,
+                potions=self.potions,
+                is_screen_up=True,
+                available_commands=["choose"],
+            )
+        return None
 
-        if isinstance(action, EndTurnAction):
-            logger.info("玩家结束回合，模拟敌方行动与下一回合抽牌...")
-            self._simulate_enemy_turn()
-            return self.state
+    def send_full_action(self, action: BaseAction) -> Optional[FullGameState]:
+        logger.info(f"[Mock Driver 接收动作]: {action.raw_command} (当前阶段: {self.phase})")
 
-        if isinstance(action, PlayCardAction):
-            card = next((c for c in self.state.hand if c.index == action.card_index), None)
-            if not card:
-                logger.error(f"打出的卡牌 c{action.card_index} 不存在！")
-                return self.state
+        if self.phase == "combat":
+            if isinstance(action, EndTurnAction):
+                self._simulate_enemy_turn()
+                return self.get_full_state()
 
-            self.state.player.energy = max(0, self.state.player.energy - card.cost)
+            if isinstance(action, PlayCardAction):
+                card = next((c for c in self.combat_state.hand if c.index == action.card_index), None)
+                if not card:
+                    return self.get_full_state()
 
-            if card.block > 0:
-                self.state.player.block += card.block
-                logger.info(f"玩家打出 {card.name}，获得 {card.block} 点格挡 (当前总格挡: {self.state.player.block})")
+                self.combat_state.player.energy = max(0, self.combat_state.player.energy - card.cost)
 
-            if card.damage > 0:
-                target_m = self.state.alive_monsters[0]
-                if action.target_index is not None:
-                    target_m = next((m for m in self.state.monsters if m.index == action.target_index), target_m)
+                if card.block > 0:
+                    self.combat_state.player.block += card.block
 
-                remain_dmg = max(0, card.damage - target_m.block)
-                target_m.block = max(0, target_m.block - card.damage)
-                target_m.current_hp = max(0, target_m.current_hp - remain_dmg)
-                logger.info(f"玩家对 {target_m.name} 造成 {card.damage} 伤害！(怪物剩余血量: {target_m.current_hp})")
+                if card.damage > 0:
+                    target_m = self.combat_state.alive_monsters[0]
+                    if action.target_index is not None:
+                        target_m = next((m for m in self.combat_state.monsters if m.index == action.target_index), target_m)
 
-                if target_m.current_hp <= 0:
-                    logger.info(f"怪物 {target_m.name} 被击杀！")
-                    target_m.is_gone = True
+                    remain_dmg = max(0, card.damage - target_m.block)
+                    target_m.block = max(0, target_m.block - card.damage)
+                    target_m.current_hp = max(0, target_m.current_hp - remain_dmg)
 
-            self.state.hand = [c for c in self.state.hand if c.index != card.index]
-            self.state.discard_pile_count += 1
+                    if target_m.current_hp <= 0:
+                        logger.info(f"怪物 {target_m.name} 被击杀！")
+                        target_m.is_gone = True
 
-            if not self.state.alive_monsters:
-                logger.info("所有怪物均已阵亡，战斗胜利！")
-                self.combat_over = True
+                self.combat_state.hand = [c for c in self.combat_state.hand if c.index != card.index]
+                self.combat_state.discard_pile_count += 1
 
-        return self.state
+                if not self.combat_state.alive_monsters:
+                    logger.info("所有怪物均已阵亡，战斗胜利！进入战利品结算界面...")
+                    self.combat_over = True
+                    self.phase = "reward"
+
+            return self.get_full_state()
+
+        elif self.phase == "reward":
+            if isinstance(action, ChooseAction):
+                # 拾取金币或点击卡牌
+                if self.screen_rewards and self.screen_rewards[0]["reward_type"] == "GOLD":
+                    self.gold += self.screen_rewards[0]["gold"]
+                    logger.info(f"拾取金币成功！当前金币: {self.gold}")
+                    self.screen_rewards.pop(0)
+                    return self.get_full_state()
+                elif self.screen_rewards and self.screen_rewards[0]["reward_type"] == "CARD":
+                    logger.info("点击卡牌奖励，进入三选一选牌界面...")
+                    self.phase = "card_reward"
+                    return self.get_full_state()
+            elif isinstance(action, ProceedAction):
+                logger.info("奖励领取完毕，前往地图路线选择...")
+                self.phase = "map"
+                return self.get_full_state()
+
+        elif self.phase == "card_reward":
+            if isinstance(action, ChooseAction):
+                logger.info(f"玩家选择将卡牌 #{action.choice} 加入卡组！")
+            elif isinstance(action, CancelAction):
+                logger.info("玩家跳过本次卡牌奖励 (Skip)！")
+            # 选牌后返回战利品界面或直接进地图
+            self.screen_rewards = []
+            self.phase = "map"
+            return self.get_full_state()
+
+        elif self.phase == "map":
+            if isinstance(action, ChooseAction):
+                logger.info(f"玩家选择地图节点 #{action.choice}，前往下一层！")
+                self.phase = "done"
+                self.game_finished = True
+                return None
+
+        return self.get_full_state()
 
     def _simulate_enemy_turn(self):
-        total_dmg = sum(m.total_incoming_damage for m in self.state.alive_monsters)
-        hp_loss = max(0, total_dmg - self.state.player.block)
-        self.state.player.block = 0
-        self.state.player.current_hp = max(0, self.state.player.current_hp - hp_loss)
-        logger.info(f"敌方攻击造成 {total_dmg} 伤害，玩家承受 {hp_loss} 点净伤 (剩余血量: {self.state.player.current_hp})")
+        total_dmg = sum(m.total_incoming_damage for m in self.combat_state.alive_monsters)
+        hp_loss = max(0, total_dmg - self.combat_state.player.block)
+        self.combat_state.player.block = 0
+        self.combat_state.player.current_hp = max(0, self.combat_state.player.current_hp - hp_loss)
 
-        if self.state.player.current_hp <= 0:
+        if self.combat_state.player.current_hp <= 0:
             logger.info("玩家生命归零，战斗失败。")
             self.combat_over = True
+            self.game_finished = True
             return
 
-        self.state.turn += 1
-        self.state.player.energy = self.state.player.max_energy
-        self.state.hand = [
+        self.combat_state.turn += 1
+        self.combat_state.player.energy = self.combat_state.player.max_energy
+        self.combat_state.hand = [
             Card(index=0, id="Strike", name="Strike", cost=1, type="ATTACK", target_type="ENEMY", damage=8),
             Card(index=1, id="Strike", name="Strike", cost=1, type="ATTACK", target_type="ENEMY", damage=8),
             Card(index=2, id="Defend", name="Defend", cost=1, type="SKILL", target_type="SELF", block=5),
         ]
 
-    def is_combat_over(self) -> bool:
-        return self.combat_over
+    def is_game_over(self) -> bool:
+        return self.game_finished
 
 
 class CommunicationModDriver(BaseGameDriver):
@@ -169,22 +313,19 @@ class CommunicationModDriver(BaseGameDriver):
     """
 
     def __init__(self):
-        self.current_state: Optional[CombatState] = None
-        self.combat_finished = False
+        self.current_full_state: Optional[FullGameState] = None
+        self.game_finished = False
 
         # 【关键握手逻辑】
-        # CommunicationMod 在拉起外部子进程后，会在 10 秒超时内等待子进程向 stdout 输出一首行信号
-        # 若未发送，CommunicationMod 会认为子进程无响应并报告:
-        # "Timed out while waiting for signal from external process." 并中断通信
         logger.info("[CommunicationMod] 向游戏发送初始就绪握手信号...")
         sys.stdout.write("ready\n")
         sys.stdout.flush()
 
-    def get_current_state(self) -> Optional[CombatState]:
-        while not self.combat_finished:
+    def get_full_state(self) -> Optional[FullGameState]:
+        while not self.game_finished:
             line = sys.stdin.readline()
             if not line:
-                self.combat_finished = True
+                self.game_finished = True
                 logger.info("CommunicationMod 标准输入管道关闭 (EOF)。")
                 return None
             line_str = line.strip()
@@ -192,27 +333,18 @@ class CommunicationModDriver(BaseGameDriver):
                 continue
             try:
                 raw_json = json.loads(line_str)
-                # 检查当前是否处于战斗中
-                game_state = raw_json.get("game_state", raw_json)
-                if not game_state.get("is_screen_up", False) and "combat_state" in game_state:
-                    self.current_state = StateCompressor.from_communication_mod_json(raw_json)
-                    return self.current_state
-                elif "combat_state" in game_state:
-                    self.current_state = StateCompressor.from_communication_mod_json(raw_json)
-                    return self.current_state
-                else:
-                    logger.info("游戏当前处于非战斗界面（如大地图/选卡牌界面），等待进入战斗...")
-                    continue
+                self.current_full_state = StateCompressor.from_communication_mod_full_json(raw_json)
+                return self.current_full_state
             except json.JSONDecodeError as e:
                 logger.warning(f"接收到非 JSON 数据: {line_str[:60]}... 异常: {e}")
                 continue
         return None
 
-    def send_action(self, action: BaseAction) -> Optional[CombatState]:
+    def send_full_action(self, action: BaseAction) -> Optional[FullGameState]:
         logger.info(f"[发送游戏指令]: {action.raw_command}")
         sys.stdout.write(f"{action.raw_command}\n")
         sys.stdout.flush()
-        return self.get_current_state()
+        return self.get_full_state()
 
-    def is_combat_over(self) -> bool:
-        return self.combat_finished
+    def is_game_over(self) -> bool:
+        return self.game_finished
