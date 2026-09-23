@@ -136,7 +136,12 @@ class FullGameState(BaseModel):
 
     @property
     def in_combat(self) -> bool:
-        return self.combat_state is not None and not self.is_screen_up and len(self.combat_state.alive_monsters) > 0
+        # 只要可用命令包含 play 或 end，无论动画状态如何均视为处于战斗中
+        if "play" in self.available_commands or "end" in self.available_commands:
+            return True
+        if self.combat_state is not None and not self.is_screen_up:
+            return len(self.combat_state.alive_monsters) > 0
+        return False
 
 
 # --- 结构化游戏指令 ---

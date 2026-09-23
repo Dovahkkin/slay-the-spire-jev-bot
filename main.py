@@ -2,6 +2,7 @@ import sys
 import os
 import argparse
 import logging
+from typing import Optional
 from dotenv import load_dotenv
 
 # 预先加载 .env 文件中的配置
@@ -26,15 +27,20 @@ from spire_agent import (
 )
 
 
-def run_game_loop(agent: JevSpireAgent, driver, max_steps: int = 500):
+def run_game_loop(agent: JevSpireAgent, driver, max_steps: Optional[int] = None):
     """
     全生命周期主循环：
     根据游戏全局状态（战斗中、战利品界面、选牌界面、地图路线、营地、事件）自动派发决策。
+    若 max_steps 为 None，将持续常驻运行，支持多局连续通关。
     """
     step = 1
     full_state = driver.get_full_state()
 
-    while full_state is not None and not driver.is_game_over() and step <= max_steps:
+    while full_state is not None and not driver.is_game_over():
+        if max_steps is not None and step > max_steps:
+            logger.info("达到指定的单次测试步数限制，主循环终止。")
+            break
+
         print("\n" + "=" * 60, file=sys.stderr)
 
         # 1. 处于战斗阶段
@@ -65,8 +71,7 @@ def run_game_loop(agent: JevSpireAgent, driver, max_steps: int = 500):
 
     if driver.is_game_over():
         logger.info("游戏阶段结束或与游戏通信断开。")
-    else:
-        logger.info("达到最大步数限制，主循环终止。")
+
 
 
 def run_combat_loop(agent: JevSpireAgent, driver, max_steps: int = 150):

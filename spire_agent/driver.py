@@ -333,6 +333,21 @@ class CommunicationModDriver(BaseGameDriver):
                 continue
             try:
                 raw_json = json.loads(line_str)
+
+                # 1. 检查游戏内外状态
+                in_game = raw_json.get("in_game", False)
+                if not in_game:
+                    logger.info("游戏当前处于主菜单或游戏外部，等待玩家进入/开始新游戏...")
+                    continue
+
+                # 2. 检查游戏是否已就绪（避免在出牌动画或场景过渡中提前执行）
+                ready = raw_json.get("ready_for_command", False)
+                available_cmds = raw_json.get("available_commands", [])
+
+                if not ready or not available_cmds:
+                    # 游戏正在处理卡牌动画或行动，等待下一帧稳定状态
+                    continue
+
                 self.current_full_state = StateCompressor.from_communication_mod_full_json(raw_json)
                 return self.current_full_state
             except json.JSONDecodeError as e:
