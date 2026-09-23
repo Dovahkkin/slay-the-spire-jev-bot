@@ -122,13 +122,19 @@ class JevSpireAgent:
                 logger.info(f"[确定性斩杀触发] 指令: {lethal_action.raw_command}")
                 return lethal_action
 
-        # 3. 状态文本压缩（DSL）
+        # 3. 确定性前置时序引擎（0费无损力量增益/过牌展开优先打出，避免时序倒挂）
+        setup_action = self._check_deterministic_setup(state, playable_cards, alive_monsters)
+        if setup_action:
+            logger.info(f"[时序优化前置触发] 指令: {setup_action.raw_command}")
+            return setup_action
+
+        # 4. 状态文本压缩（DSL）
         compressed_state = StateCompressor.compress(state)
 
-        # 4. 构建 Jev 原语
+        # 5. 构建 Jev 原语
         questions = self._build_jev_questions(state, playable_cards, alive_monsters)
 
-        # 5. 调用 Jev / Mock 降级
+        # 6. 调用 Jev / Mock 降级
         if self.client:
             try:
                 response = self.client.system_one(
@@ -147,9 +153,16 @@ class JevSpireAgent:
     ) -> Optional[PlayCardAction]:
         """
         确定性斩杀检查：
-        如果手里存在能直接击杀单体怪物的攻击牌（单牌伤害 >= 剩余生命 + 格挡），立即打出！
+        1. 直接斩杀：单张攻击牌伤害 >= 剩余生命 + 格挡；
+        2. 协同斩杀：若手里有 0 费【活动肌肉 (Flex)】且打出后某张攻击牌刚好能斩杀，优先打出 Flex！
         """
         energy = state.player.energy
+        flex_card = next(
+            (c for c in playable_cards if c.cost == 0 and ("flex" in c.name.lower() or "strength" in (c.description or "").lower())),
+            None,
+        )
+
+        # A. 直接单牌斩杀
         for m in alive_monsters:
             effective_hp = m.current_hp + m.block
             for c in playable_cards:
@@ -157,6 +170,71 @@ class JevSpireAgent:
                     if c.damage >= effective_hp:
                         target = m.index if (c.has_target or c.target_type == "ENEMY") else None
                         return PlayCardAction.create(c.index, target)
+
+        # B. Flex 协同斩杀
+        if flex_card:
+            flex_boost = 4 if flex_card.upgraded else 2
+            for m in alive_monsters:
+                effective_hp = m.current_hp + m.block
+                for c in playable_cards:
+                    if c.type == "ATTACK" and c.index != flex_card.index and c.cost <= energy:
+                        if c.damage + flex_boost >= effective_hp:
+                            logger.info(f"[协同斩杀触发] 先打出 0 费 {flex_card.name}，赋能后续 {c.name} 斩杀！")
+                            target = m.index if (flex_card.has_target or flex_card.target_type == "ENEMY") else None
+                            return PlayCardAction.create(flex_card.index, target)
+
+        return None
+
+    def _check_deterministic_setup(
+        self, state: CombatState, playable_cards: List[Card], alive_monsters: List[Monster]
+    ) -> Optional[PlayCardAction]:
+        """
+        确定性前置时序引擎：
+        在打出攻击牌前，无脑优势的 0 费增益（如活动肌肉）、回费/抽牌卡牌强制先手打出，
+        彻底解决“先打普通攻击、后打活动肌肉”等出牌倒挂问题。
+        """
+        energy = state.player.energy
+
+        # 1. 0 费力量增益牌：如【活动肌肉 (Flex)】
+        # 触发条件：手牌中还有其他可打出的攻击牌，且场上有存活敌人
+        playable_attacks = [c for c in playable_cards if c.type == "ATTACK"]
+        for c in playable_cards:
+            c_name = c.name.lower()
+            c_desc = (c.description or "").lower()
+            if c.cost == 0 and ("flex" in c_name or ("strength" in c_desc and "gain" in c_desc and "end of your turn" in c_desc)):
+                # 如果手牌里有能享受力量增益的攻击牌（排除自己）
+                other_attacks = [atk for atk in playable_attacks if atk.index != c.index]
+                if other_attacks:
+                    logger.info(f"--> [时序优化前置触发]: 手牌存在 {len(other_attacks)} 张可用攻击牌，优先打出 0 费增益卡牌 [{c.name}]！")
+                    target = alive_monsters[0].index if (c.has_target or c.target_type == "ENEMY") else None
+                    return PlayCardAction.create(c.index, target)
+
+        # 2. 0 费无损启动/抽牌卡牌：如【肾上腺素 (Adrenaline)】、【祭品 (Offering)】、【战斗专注 (Battle Trance)】、【亮剑 (Seeing Red)】
+        for c in playable_cards:
+            c_name = c.name.lower()
+            # 肾上腺素 Adrenaline: 纯正面收益（回费+抽牌），无脑第一手打出
+            if c.cost == 0 and "adrenaline" in c_name:
+                logger.info(f"--> [时序优化前置触发]: 优先打出核心展开卡牌 [{c.name}]！")
+                return PlayCardAction.create(c.index)
+
+            # 祭品 Offering: 只要血量安全 (> 10)，回费+过牌无脑第一手打出
+            if c.cost == 0 and "offering" in c_name and state.player.current_hp > 10:
+                if energy < state.player.max_energy or len(state.hand) <= 6:
+                    logger.info(f"--> [时序优化前置触发]: 优先打出过牌回费启动牌 [{c.name}]！")
+                    return PlayCardAction.create(c.index)
+
+            # 战斗专注 Battle Trance: 0 费抽 3/4 张牌
+            if c.cost == 0 and "battle trance" in c_name and len(state.hand) <= 6:
+                logger.info(f"--> [时序优化前置触发]: 优先打出 0 费过牌 [{c.name}] 扩充手牌选项！")
+                return PlayCardAction.create(c.index)
+
+            # 亮剑 Seeing Red: 0 费回 2 费，当前费用不足以打完全部手牌时使用
+            if c.cost == 0 and "seeing red" in c_name and energy <= state.player.max_energy:
+                cost_needed = sum(card.cost for card in playable_cards if card.index != c.index and card.cost > 0)
+                if cost_needed > energy:
+                    logger.info(f"--> [时序优化前置触发]: 打出 0 费充能牌 [{c.name}] 补充能量！")
+                    return PlayCardAction.create(c.index)
+
         return None
 
     def _build_jev_questions(
@@ -182,19 +260,43 @@ class JevSpireAgent:
         for c in playable_cards:
             card_key = f"card_{c.index}"
             effects: List[str] = []
+            tags: List[str] = []
+            c_name_lower = c.name.lower()
+            c_desc_lower = (c.description or "").lower()
+
+            if "flex" in c_name_lower or ("strength" in c_desc_lower and "gain" in c_desc_lower):
+                tags.append("[SETUP BUFF: +Strength]")
+            elif "vulnerable" in c_desc_lower or c.id == "Bash":
+                tags.append("[VULNERABLE DEBUFF (+50% DMG to enemy)]")
+            elif "weak" in c_desc_lower:
+                tags.append("[WEAK DEBUFF (-25% ATK)]")
+            elif c.type == "POWER":
+                tags.append("[SCALING POWER: Persistent buff]")
+            elif any(kw in c_name_lower for kw in ["battle trance", "offering", "seeing red", "warcry"]):
+                tags.append("[DRAW/ENERGY SETUP]")
+
             if c.damage > 0:
                 effects.append(f"Deal {c.damage} damage")
             if c.block > 0:
                 effects.append(f"Gain {c.block} block")
             if c.description:
                 effects.append(c.description)
-            desc = f"{c.name} (Cost: {c.cost}E) -> {', '.join(effects)}"
+            tag_str = f" {' '.join(tags)}" if tags else ""
+            desc = f"{c.name} (Cost: {c.cost}E){tag_str} -> {', '.join(effects)}"
             card_criteria[card_key] = desc
 
-        card_criteria["end_turn"] = "End turn now without playing further cards (e.g. saving HP, preserving energy, or no favorable actions)."
+        card_criteria["end_turn"] = "End turn now without playing further cards (ONLY when no favorable or positive actions remain)."
 
         card_choice_question = Choice(
-            instructions="Which action should the player take next given the current battlefield state?",
+            instructions=(
+                "Which action should the player take next given the battlefield state? "
+                "Follow Slay the Spire expert play sequencing: "
+                "1) Play 0-cost buffs/energy/draw setups first to maximize options; "
+                "2) Apply Vulnerable/Weak debuffs BEFORE dealing heavy attacks; "
+                "3) Play block to mitigate unblocked incoming damage; "
+                "4) Play high-impact attacks or persistent powers. "
+                "Do NOT end turn prematurely if useful cards can still be played."
+            ),
             criteria=card_criteria,
         )
 
@@ -202,12 +304,18 @@ class JevSpireAgent:
         target_criteria: Dict[str, str] = {}
         for m in alive_monsters:
             intent_str = f"Atk {m.move_damage}x{m.move_hits}" if "ATTACK" in m.intent.upper() else m.intent
+            threat_note = ""
+            if "ATTACK" in m.intent.upper() and m.move_damage * max(1, m.move_hits) >= 10:
+                threat_note = " [HIGH THREAT ATTACKER]"
             target_criteria[f"enemy_{m.index}"] = (
-                f"{m.name} (HP: {m.current_hp}/{m.max_hp}, Block: {m.block}, Intent: {intent_str})"
+                f"{m.name} (HP: {m.current_hp}/{m.max_hp}, Block: {m.block}, Intent: {intent_str}){threat_note}"
             )
 
         target_choice_question = Choice(
-            instructions="If a single-target attack or debuff card is chosen, which enemy should be the primary focus target?",
+            instructions=(
+                "If a single-target attack or debuff card is chosen, which enemy should be the primary focus target? "
+                "Prioritize killing enemies that can be eliminated this turn, or neutralizing dangerous high-damage attackers."
+            ),
             criteria=target_criteria if target_criteria else {"enemy_0": "Default target"},
         )
 
@@ -288,8 +396,28 @@ class JevSpireAgent:
     ) -> BaseAction:
         """
         离线启发式兜底逻辑（用于无 API Key 时的本地沙盒演示与单元测试）
+        具备基础时序与攻防权衡能力：
+        1. 0 费增益优先：手牌有攻击时优先打出 0 费加攻（Flex 等）
+        2. 防御减伤：当受到未格挡伤害时，优先打出格挡
+        3. 易伤前置：若手牌有易伤卡（如 Bash），在主力攻击前打出
+        4. 主力攻击/斩杀：优先集火残血或正在蓄力高伤的敌人
         """
-        total_incoming = sum(m.total_incoming_damage for m in alive_monsters)
+        # 1. 0 费力量增益卡牌前置
+        playable_attacks = [c for c in playable_cards if c.type == "ATTACK"]
+        flex_card = next(
+            (c for c in playable_cards if c.cost == 0 and ("flex" in c.name.lower() or "strength" in (c.description or "").lower())),
+            None,
+        )
+        if flex_card and playable_attacks:
+            target = alive_monsters[0].index if (flex_card.has_target or flex_card.target_type == "ENEMY") else None
+            return PlayCardAction.create(flex_card.index, target)
+
+        # 2. 计算未格挡伤害与防御需求
+        total_incoming = sum(
+            m.move_damage * max(1, m.move_hits)
+            for m in alive_monsters
+            if "ATTACK" in m.intent.upper()
+        )
         needed_block = max(0, total_incoming - state.player.block)
 
         if needed_block > 0:
@@ -298,9 +426,20 @@ class JevSpireAgent:
                 best_block = max(block_cards, key=lambda c: c.block)
                 return PlayCardAction.create(best_block.index, None)
 
-        attack_cards = [c for c in playable_cards if c.type == "ATTACK"]
-        if attack_cards:
-            best_atk = max(attack_cards, key=lambda c: c.damage)
+        # 3. 易伤卡牌前置（若目标未处于易伤状态且后续还有攻击牌）
+        if len(playable_attacks) >= 2 and alive_monsters:
+            target_enemy = alive_monsters[0]
+            is_vulnerable = any(pw.id == "Vulnerable" and pw.amount > 0 for pw in target_enemy.powers)
+            if not is_vulnerable:
+                vuln_cards = [c for c in playable_attacks if "vulnerable" in (c.description or "").lower() or c.id == "Bash"]
+                if vuln_cards:
+                    best_vuln = vuln_cards[0]
+                    target = target_enemy.index if (best_vuln.has_target or best_vuln.target_type == "ENEMY") else None
+                    return PlayCardAction.create(best_vuln.index, target)
+
+        # 4. 攻击牌：优先选择伤害最高的攻击
+        if playable_attacks:
+            best_atk = max(playable_attacks, key=lambda c: c.damage)
             target = alive_monsters[0].index if (best_atk.has_target or best_atk.target_type == "ENEMY") else None
             return PlayCardAction.create(best_atk.index, target)
 

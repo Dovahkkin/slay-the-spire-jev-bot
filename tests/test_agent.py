@@ -196,6 +196,55 @@ class TestSpireAgent(unittest.TestCase):
         self.assertEqual(act_empty.choice, "0")
 
 
+    def test_flex_before_attack_sequencing(self):
+        """测试 0 费增益卡（如活动肌肉 Flex）必须先于攻击卡打出，杜绝时序倒挂"""
+        strike = Card(index=0, id="Strike_R", name="Strike", cost=1, type="ATTACK", target_type="ENEMY", damage=6)
+        flex = Card(index=1, id="Flex", name="Flex", cost=0, type="SKILL", target_type="SELF", description="Gain 2 Strength. At the end of your turn, lose 2 Strength.")
+        defend = Card(index=2, id="Defend_R", name="Defend", cost=1, type="SKILL", target_type="SELF", block=5)
+
+        m = Monster(index=0, id="JawWorm", name="Jaw Worm", current_hp=35, max_hp=42, block=0, intent="ATTACK", move_damage=11)
+        state = CombatState(turn=1, player=self.p, monsters=[m], hand=[strike, flex, defend])
+
+        agent = JevSpireAgent(enable_deterministic_lethal=True)
+        act = agent.decide_action(state)
+
+        # 必须优先打出索引为 1 的 Flex 卡牌，绝不能先打 Strike
+        self.assertIsInstance(act, PlayCardAction)
+        self.assertEqual(act.card_index, 1, "手牌有攻击卡时，0 费力量增益卡 Flex 必须优先于攻击牌打出！")
+
+    def test_flex_assisted_lethal(self):
+        """测试协同斩杀：单张打击打不死，但 Flex(+2)+打击(8+2=10)刚好斩杀时，优先打出 Flex"""
+        strike = Card(index=0, id="Strike_R", name="Strike", cost=1, type="ATTACK", target_type="ENEMY", damage=8)
+        flex = Card(index=1, id="Flex", name="Flex", cost=0, type="SKILL", target_type="SELF", description="Gain 2 Strength.")
+
+        # 怪物剩余 10 点血，单独打击打不死，但 Flex 增益后恰好斩杀
+        m = Monster(index=0, id="Cultist", name="Cultist", current_hp=10, max_hp=48, block=0, intent="ATTACK", move_damage=6)
+        state = CombatState(turn=1, player=self.p, monsters=[m], hand=[strike, flex])
+
+        agent = JevSpireAgent(enable_deterministic_lethal=True)
+        act = agent.decide_action(state)
+
+        self.assertIsInstance(act, PlayCardAction)
+        self.assertEqual(act.card_index, 1, "协同斩杀应优先触发 Flex 增益牌！")
+
+    def test_incoming_threat_dsl_and_synergy_tags(self):
+        """测试 DSL 中包含明确的威胁计算与协同标签"""
+        m = Monster(index=0, id="Cultist", name="Cultist", current_hp=30, max_hp=48, block=0, intent="ATTACK", move_damage=12, move_hits=1)
+        flex = Card(index=0, id="Flex", name="Flex", cost=0, type="SKILL", target_type="SELF", description="Gain 2 Strength.")
+        bash = Card(index=1, id="Bash", name="Bash", cost=2, type="ATTACK", target_type="ENEMY", damage=8, description="Deal 8 damage. Apply 2 Vulnerable.")
+
+        state = CombatState(turn=1, player=self.p, monsters=[m], hand=[flex, bash])
+        dsl = StateCompressor.compress(state)
+
+        # 验证威胁计算
+        self.assertIn("INCOMING THREAT: 12 dmg", dsl)
+        self.assertIn("UNBLOCKED: 7 HP damage!", dsl)  # 12 incoming - 5 block = 7
+        # 验证协同标签
+        self.assertIn("[SETUP BUFF: +Strength]", dsl)
+        self.assertIn("[VULNERABLE DEBUFF (+50% DMG)]", dsl)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

@@ -38,6 +38,22 @@ class StateCompressor:
                 f"- E{m.index} ({m.name}): HP {m.current_hp}/{m.max_hp} | BLK {m.block} | INTENT: {intent_desc} | BUFFS: {m_powers_str}"
             )
 
+        # 计算敌方总攻击伤害与净扣血威胁
+        total_incoming_attack = sum(
+            m.move_damage * max(1, m.move_hits)
+            for m in state.alive_monsters
+            if "ATTACK" in m.intent.upper()
+        )
+        net_damage = max(0, total_incoming_attack - p.block)
+        threat_str = f"INCOMING THREAT: {total_incoming_attack} dmg"
+        if total_incoming_attack == 0:
+            threat_str += " (No incoming attack)"
+        elif net_damage > 0:
+            threat_str += f" (Current Block: {p.block} -> UNBLOCKED: {net_damage} HP damage!)"
+        else:
+            threat_str += f" (Current Block: {p.block} -> FULLY BLOCKED)"
+        lines.append(threat_str)
+
         # 3. Playable Hand
         lines.append("PLAYABLE_CARDS:")
         playable = state.playable_cards
@@ -46,6 +62,21 @@ class StateCompressor:
         else:
             for c in playable:
                 effects: List[str] = []
+                tags: List[str] = []
+                c_name_lower = c.name.lower()
+                c_desc_lower = c.description.lower() if c.description else ""
+
+                if "flex" in c_name_lower or ("strength" in c_desc_lower and "gain" in c_desc_lower):
+                    tags.append("[SETUP BUFF: +Strength]")
+                elif "vulnerable" in c_desc_lower or c.id == "Bash":
+                    tags.append("[VULNERABLE DEBUFF (+50% DMG)]")
+                elif "weak" in c_desc_lower:
+                    tags.append("[WEAK DEBUFF (-25% ATK)]")
+                elif c.type == "POWER":
+                    tags.append("[POWER: Persistent Buff]")
+                elif any(kw in c_name_lower for kw in ["battle trance", "offering", "seeing red", "warcry"]):
+                    tags.append("[DRAW/ENERGY SETUP]")
+
                 if c.damage > 0:
                     effects.append(f"{c.damage} dmg")
                 if c.block > 0:
@@ -53,9 +84,10 @@ class StateCompressor:
                 if c.description:
                     effects.append(c.description)
                 eff_str = ", ".join(effects) if effects else "Special effect"
+                tag_str = f" {' '.join(tags)}" if tags else ""
 
                 target_str = f"Target: {c.target_type}"
-                lines.append(f"* [c{c.index}] {c.name} ({c.cost}E) -> {eff_str} ({target_str})")
+                lines.append(f"* [c{c.index}] {c.name} ({c.cost}E){tag_str} -> {eff_str} ({target_str})")
 
         # 4. Unplayable Hand
         unplayable = [c for c in state.hand if c not in playable]
